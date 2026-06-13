@@ -428,9 +428,10 @@ func (s *Service) ProvisionAIRequest(ctx context.Context, req db.Request) (*db.A
 		return nil, err
 	}
 	// A provider may mint a real credential (e.g. a LiteLLM virtual key). Never
-	// persist it in the DB - move it to OpenBao and record only a pointer. The
-	// raw value is returned ONCE to the caller (mintedSecret) so they can copy it.
-	mintedSecret := s.stripMintedSecret(ctx, req.ID, res.Observed)
+	// persist it in the DB - move it to OpenBao and record only a pointer + masked
+	// preview. An operator retrieves the raw key on demand via
+	// GET /ai/instances/{id}/secret (RevealAIInstanceSecret), audited.
+	s.stripMintedSecret(ctx, req.ID, res.Observed)
 	observed, _ := json.Marshal(res.Observed)
 	inst, err := s.q.CreateAIServiceInstance(ctx, db.CreateAIServiceInstanceParams{
 		ServiceID:        service.ID,
@@ -445,7 +446,6 @@ func (s *Service) ProvisionAIRequest(ctx context.Context, req db.Request) (*db.A
 		ProvisionedAt:    pgtype.Timestamptz{Time: time.Now(), Valid: true},
 		ExpiresAt:        pgTime(expiresAt),
 	})
-	_ = mintedSecret // surfaced via the instance observed pointer; see stripMintedSecret
 	if err != nil {
 		return nil, fmt.Errorf("creating ai service instance: %w", err)
 	}
@@ -511,6 +511,59 @@ func maskKey(k string) string {
 	return k[:4] + "…" + k[len(k)-4:]
 }
 
+// mintedKeyPath extracts the OpenBao path where a provider-minted key was stored
+// (set by stripMintedSecret), or "" if this instance has no stored secret.
+func mintedKeyPath(observed []byte) string {
+	if len(observed) == 0 {
+		return ""
+	}
+	var m map[string]any
+	if json.Unmarshal(observed, &m) != nil {
+		return ""
+	}
+	p, _ := m["virtual_key_secret"].(string)
+	return strings.TrimSpace(p)
+}
+
+// readMintedKey reads a minted key back from the secret store (nil-safe).
+func (s *Service) readMintedKey(ctx context.Context, path string) string {
+	if path == "" || s.creds == nil {
+		return ""
+	}
+	reader, ok := s.creds.(aiSecretReader)
+	if !ok {
+		return ""
+	}
+	sec, err := reader.ReadSecret(ctx, path)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(sec["key"])
+}
+
+// RevealAIInstanceSecret returns the raw provider-minted credential (e.g. a
+// LiteLLM virtual key) for an instance, read from the secret store on demand -
+// the key is never in the DB. Operator-gated at the API; every reveal is audited.
+func (s *Service) RevealAIInstanceSecret(ctx context.Context, id uuid.UUID, actor string) (string, error) {
+	inst, err := s.q.GetAIServiceInstance(ctx, id)
+	if err != nil {
+		return "", fmt.Errorf("ai instance %s not found: %w", id, err)
+	}
+	if tid, scoped := scopeTenant(ctx); scoped && !tenantVisible(inst.TenantID, tid) {
+		return "", fmt.Errorf("ai instance %s not found", id)
+	}
+	path := mintedKeyPath(inst.Observed)
+	if path == "" {
+		return "", fmt.Errorf("ai instance %s has no stored minted secret", id)
+	}
+	key := s.readMintedKey(ctx, path)
+	if key == "" {
+		return "", fmt.Errorf("minted secret not retrievable from the secret store")
+	}
+	s.emitAIAudit(ctx, "ai_instance", inst.ID, "secret_revealed", "minted AI credential revealed", map[string]any{"owner": inst.Owner}, actor)
+	return key, nil
+}
+
 // ReapExpiredAIInstances revokes AI access instances whose expiry has passed -
 // the access-governance safety net (SOC2/ISO: a grant must not outlive its
 // approved window). It revokes through the provider (real workspace removal /
@@ -567,8 +620,15 @@ func (s *Service) RevokeAIInstance(ctx context.Context, id uuid.UUID, actor stri
 	if err != nil {
 		return nil, err
 	}
+	creds := s.aiCredentials(ctx, provider)
+	// Hand the raw minted key (read from the secret store) to the revoke so a
+	// provider can fall back to delete-by-key if delete-by-alias is unsupported -
+	// closing the orphaned-key window.
+	if k := s.readMintedKey(ctx, mintedKeyPath(inst.Observed)); k != "" {
+		creds["minted_key"] = k
+	}
 	if err := prov.RevokeAccess(ctx, aiproviders.RevokeRequest{
-		InstanceID: inst.ID, ProviderAccessID: inst.ProviderAccessID, Credentials: s.aiCredentials(ctx, provider), Config: aiProviderConfig(provider),
+		InstanceID: inst.ID, ProviderAccessID: inst.ProviderAccessID, Credentials: creds, Config: aiProviderConfig(provider),
 	}); err != nil {
 		s.emitAIAudit(ctx, "ai_instance", inst.ID, "revoke_failed", err.Error(), map[string]any{"provider": provider.Name}, actor)
 		return nil, err
@@ -650,7 +710,8 @@ func rejectAIProviderSecretConfig(cfg map[string]any) error {
 
 func isSensitiveAIConfigKey(key string) bool {
 	switch strings.ToLower(strings.TrimSpace(key)) {
-	case "api_key", "openai_api_key", "anthropic_api_key", "token", "access_token", "bearer_token", "secret", "client_secret", "password":
+	case "api_key", "openai_api_key", "anthropic_api_key", "admin_api_key", "token", "access_token",
+		"bearer_token", "secret", "client_secret", "password", "master_key", "litellm_master_key":
 		return true
 	default:
 		return false

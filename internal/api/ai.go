@@ -11,6 +11,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
+	"github.com/cz8jmh4n7f-bit/opord-ai-demo/internal/auth"
 	"github.com/cz8jmh4n7f-bit/opord-ai-demo/internal/db"
 	"github.com/cz8jmh4n7f-bit/opord-ai-demo/internal/orchestrator"
 )
@@ -210,7 +211,8 @@ func redactAIProviderConfig(cfg map[string]any) map[string]any {
 
 func isSensitiveAIProviderConfigKey(key string) bool {
 	switch strings.ToLower(strings.TrimSpace(key)) {
-	case "api_key", "openai_api_key", "anthropic_api_key", "token", "access_token", "bearer_token", "secret", "client_secret", "password":
+	case "api_key", "openai_api_key", "anthropic_api_key", "admin_api_key", "token", "access_token",
+		"bearer_token", "secret", "client_secret", "password", "master_key", "litellm_master_key":
 		return true
 	default:
 		return false
@@ -526,6 +528,28 @@ func (s *Server) listAIInstances(w http.ResponseWriter, r *http.Request) {
 		out = append(out, aiInstanceToDTO(inst))
 	}
 	writeJSON(w, http.StatusOK, out)
+}
+
+// revealAIInstanceSecret returns the raw provider-minted credential (e.g. a
+// LiteLLM virtual key) for an instance, read from the secret store on demand -
+// the key is never stored in the DB. Operator+; every reveal is audited.
+func (s *Server) revealAIInstanceSecret(w http.ResponseWriter, r *http.Request) {
+	id, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	actor := "api"
+	if ident, ok := auth.IdentityFrom(r.Context()); ok && ident.Email != "" {
+		actor = ident.Email
+	}
+	key, err := s.svc.RevealAIInstanceSecret(r.Context(), id, actor)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	writeJSON(w, http.StatusOK, map[string]string{"key": key})
 }
 
 // reapExpiredAIInstances runs the access-expiry sweep on demand (it also runs on

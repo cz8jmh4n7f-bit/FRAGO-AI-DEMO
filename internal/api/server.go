@@ -195,6 +195,7 @@ func (s *Server) Routes() http.Handler {
 			r.Post("/ai/requests/{name}/approve", s.approveAIRequest)
 			r.Post("/ai/requests/{name}/reject", s.rejectAIRequest)
 			r.Post("/ai/instances/{id}/revoke", s.revokeAIInstance)
+			r.Get("/ai/instances/{id}/secret", s.revealAIInstanceSecret)
 			r.Post("/ai/instances/reap-expired", s.reapExpiredAIInstances)
 			// Agent & MCP governance writes.
 			r.Post("/ai/mcp/servers", s.registerMCPServer)

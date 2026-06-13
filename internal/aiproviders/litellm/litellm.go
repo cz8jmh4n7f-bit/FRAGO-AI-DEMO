@@ -219,7 +219,10 @@ func (p Provider) ProvisionAccess(ctx context.Context, req aiproviders.Provision
 	return &aiproviders.ProvisionResult{ProviderAccessID: alias, Observed: observed}, nil
 }
 
-// RevokeAccess deletes the virtual key by its alias (no raw key needed).
+// RevokeAccess deletes the virtual key by its alias. If alias-delete fails (older
+// LiteLLM without key_aliases support) it falls back to delete-by-key when the raw
+// key is available (the orchestrator reads it from the secret store and passes it
+// as minted_key) - so a revoke can never silently leave a live, spending key.
 func (p Provider) RevokeAccess(ctx context.Context, req aiproviders.RevokeRequest) error {
 	if req.ProviderAccessID == "" {
 		return fmt.Errorf("provider access id is required")
@@ -227,8 +230,16 @@ func (p Provider) RevokeAccess(ctx context.Context, req aiproviders.RevokeReques
 	if masterKey(req.Credentials) == "" {
 		return nil // governance-only record; nothing to delete upstream
 	}
-	body := map[string]any{"key_aliases": []string{req.ProviderAccessID}}
-	return p.do(ctx, req.Credentials, req.Config, http.MethodPost, "/key/delete", body, nil)
+	err := p.do(ctx, req.Credentials, req.Config, http.MethodPost, "/key/delete",
+		map[string]any{"key_aliases": []string{req.ProviderAccessID}}, nil)
+	if err != nil {
+		if mk := strings.TrimSpace(req.Credentials["minted_key"]); mk != "" {
+			return p.do(ctx, req.Credentials, req.Config, http.MethodPost, "/key/delete",
+				map[string]any{"keys": []string{mk}}, nil)
+		}
+		return err
+	}
+	return nil
 }
 
 // GetUsage pulls the key's real spend from LiteLLM (the spend-report path).
