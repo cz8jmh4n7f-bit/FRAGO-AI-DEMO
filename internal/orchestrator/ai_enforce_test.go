@@ -4,9 +4,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cz8jmh4n7f-bit/opord-ai-demo/internal/db"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgtype"
-	"github.com/cz8jmh4n7f-bit/opord-ai-demo/internal/db"
 )
 
 func TestEmailDomain(t *testing.T) {
@@ -59,6 +59,30 @@ func TestPolicyRuleMatchesAndDeny(t *testing.T) {
 	}
 }
 
+// TestEmptyPolicyRuleIsNotDenyAll locks in the F14 fix: a policy whose rules object
+// is empty/null unmarshals to a zero rule that isDeny()=true and matches()=true
+// (empty selectors are wildcards). The enforcement loop additionally requires
+// hasSelector(), so such a rule is INERT and does not block-all.
+func TestEmptyPolicyRuleIsNotDenyAll(t *testing.T) {
+	rc := aiReqContext{ServiceSlug: "claude-api-access", ProviderName: "openai-main", Owner: "a@corp.com"}
+	empty := aiPolicyRule{} // what json.Unmarshal of {} or null yields
+	if !empty.isDeny() || !empty.matches(rc) {
+		t.Fatal("an empty rule is (deny + matches-everything) - that's exactly the footgun")
+	}
+	if empty.hasSelector() {
+		t.Fatal("an empty rule must report NO selectors, so the enforcement guard skips it")
+	}
+	// A rule with only blank selector values is still selector-less.
+	blank := aiPolicyRule{Providers: []string{"", "  "}, OwnerDomains: []string{""}}
+	if blank.hasSelector() {
+		t.Fatal("blank-only selectors must not count as a real selector")
+	}
+	// A real selector must register.
+	if !(aiPolicyRule{Providers: []string{"openai"}}).hasSelector() {
+		t.Fatal("a non-empty selector must be detected")
+	}
+}
+
 func TestBudgetAppliesToRequest(t *testing.T) {
 	tid := uuid.New()
 	rc := aiReqContext{
@@ -107,6 +131,29 @@ func TestBudgetScopeMatchesImportedUsage(t *testing.T) {
 	other := db.AiBudget{Scope: "workspace", ScopeRef: "team-other"}
 	if aiBudgetScopeMatches(other, imported) {
 		t.Fatal("imported usage must not leak into an unrelated workspace budget")
+	}
+}
+
+// TestAICostSupersession locks in the F1 fix: when a provider has BOTH a gateway
+// estimate (opord_gateway_lite) and an authoritative import for the same period,
+// only the authoritative figure counts - the estimate is dropped, not double-added.
+// A provider with only an estimate keeps it.
+func TestAICostSupersession(t *testing.T) {
+	now := time.Now()
+	usage := []db.ListAIUsageRecordsRow{
+		// openai: estimate $4 + authoritative import $10 -> only $10 should count.
+		{ProviderName: "openai-main", Metric: "tokens", CostUsd: 4, PeriodStart: now, Raw: []byte(`{"source":"opord_gateway_lite"}`)},
+		{ProviderName: "openai-main", Metric: "cost_usd", CostUsd: 10, PeriodStart: now, Raw: []byte(`{"source":"openai_costs_api"}`)},
+		// anthropic: estimate only -> the $3 estimate is kept (no import to supersede it).
+		{ProviderName: "anthropic-main", Metric: "tokens", CostUsd: 3, PeriodStart: now, Raw: []byte(`{"source":"opord_gateway_lite"}`)},
+	}
+	got := aiCostUSD(usage, aiBudgetPeriodStart("monthly"), func(db.ListAIUsageRecordsRow) bool { return true })
+	if got != 13 { // 10 (authoritative openai) + 3 (anthropic estimate), NOT 17
+		t.Fatalf("aiCostUSD with supersession = %v, want 13 (10 authoritative + 3 estimate, no double-count)", got)
+	}
+	// The cost-quota path must agree (it routes through aiCostUSD).
+	if q := aiQuotaUsage("cost_usd", "monthly", usage); q != 13 {
+		t.Fatalf("cost quota usage = %v, want 13", q)
 	}
 }
 

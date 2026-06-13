@@ -12,11 +12,11 @@ import (
 	"strings"
 	"time"
 
+	"github.com/cz8jmh4n7f-bit/opord-ai-demo/internal/aiproviders"
+	"github.com/cz8jmh4n7f-bit/opord-ai-demo/internal/db"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
-	"github.com/cz8jmh4n7f-bit/opord-ai-demo/internal/aiproviders"
-	"github.com/cz8jmh4n7f-bit/opord-ai-demo/internal/db"
 )
 
 type AIBudgetInput struct {
@@ -90,6 +90,9 @@ func (s *Service) CreateAIBudget(ctx context.Context, in AIBudgetInput) (db.AiBu
 	if in.LimitUSD <= 0 {
 		return db.AiBudget{}, fmt.Errorf("limit_usd must be greater than zero")
 	}
+	if err := validateAIBudgetThresholds(soft, hard); err != nil {
+		return db.AiBudget{}, err
+	}
 	b, err := s.q.CreateAIBudget(ctx, db.CreateAIBudgetParams{
 		TenantID:         tenantForCreate(ctx),
 		Scope:            scope,
@@ -140,10 +143,48 @@ func (s *Service) ListAIBudgetSummaries(ctx context.Context) ([]AIBudgetSummary,
 
 func aiBudgetActualUSD(b db.AiBudget, usage []db.ListAIUsageRecordsRow) float64 {
 	start := aiBudgetPeriodStart(b.Period)
+	return aiCostUSD(usage, start, func(u db.ListAIUsageRecordsRow) bool {
+		return aiBudgetScopeMatches(b, u)
+	})
+}
+
+// aiAuthoritativeCostSources are spend-report imports whose cost SUPERSEDES the
+// gateway's own per-call estimate (opord_gateway_lite) for the same provider in
+// the same window. Without this, a provider that has BOTH a gateway estimate and
+// an authoritative import for a period would be double-counted in budgets/quotas.
+var aiAuthoritativeCostSources = map[string]bool{
+	"openai_costs_api":      true,
+	"anthropic_cost_report": true,
+	"litellm_spend":         true,
+}
+
+// usageSource returns the lowercased "source" tag from a usage row's raw JSON.
+func usageSource(raw []byte) string {
+	return strings.ToLower(usageRawField(raw, "source"))
+}
+
+// aiCostUSD sums CostUsd over usage rows that match inScope and whose period_start
+// is at or after start, applying SUPERSESSION: when an authoritative spend-report
+// row exists for a provider in the window, that provider's gateway estimate
+// (opord_gateway_lite) is dropped so the estimate and the authoritative figure are
+// not double-counted. Providers without an import keep their gateway estimate.
+func aiCostUSD(usage []db.ListAIUsageRecordsRow, start time.Time, inScope func(db.ListAIUsageRecordsRow) bool) float64 {
+	authoritative := map[string]bool{}
+	for _, u := range usage {
+		if u.PeriodStart.Before(start) || !inScope(u) {
+			continue
+		}
+		if aiAuthoritativeCostSources[usageSource(u.Raw)] {
+			authoritative[strings.ToLower(u.ProviderName)] = true
+		}
+	}
 	var total float64
 	for _, u := range usage {
-		if u.PeriodStart.Before(start) || !aiBudgetScopeMatches(b, u) {
+		if u.PeriodStart.Before(start) || !inScope(u) {
 			continue
+		}
+		if usageSource(u.Raw) == "opord_gateway_lite" && authoritative[strings.ToLower(u.ProviderName)] {
+			continue // superseded by an authoritative import for this provider
 		}
 		total += u.CostUsd
 	}
@@ -507,6 +548,237 @@ type AnthropicCostImportResult struct {
 	PeriodEnd    time.Time
 }
 
+// UpdateAIBudget edits a budget's limit/period/thresholds.
+// aiTenantGuard verifies the caller may mutate a tenant-owned governance row.
+// Scoped (non-admin, tenant-bound) callers may only touch their OWN tenant's
+// rows; on a mismatch it returns a not-found error so an IDOR probe can neither
+// edit nor enumerate another tenant's budgets/quotas/policies. Admins, CLI, and
+// dev mode are unscoped and pass through.
+func (s *Service) aiTenantGuard(ctx context.Context, rowTenant pgtype.UUID) error {
+	if tid, scoped := scopeTenant(ctx); scoped && !tenantVisible(rowTenant, tid) {
+		return fmt.Errorf("not found")
+	}
+	return nil
+}
+
+// validateAIBudgetThresholds rejects nonsensical alert/stop bands: both must be
+// positive and the soft (warning) threshold must not exceed the hard (stop) one.
+func validateAIBudgetThresholds(soft, hard int32) error {
+	if soft <= 0 || hard <= 0 {
+		return fmt.Errorf("threshold percentages must be greater than zero")
+	}
+	if soft > hard {
+		return fmt.Errorf("soft threshold (%d%%) must not exceed hard threshold (%d%%)", soft, hard)
+	}
+	return nil
+}
+
+func (s *Service) UpdateAIBudget(ctx context.Context, id uuid.UUID, in AIBudgetInput) (db.AiBudget, error) {
+	if in.LimitUSD <= 0 {
+		return db.AiBudget{}, fmt.Errorf("limit_usd must be greater than zero")
+	}
+	existing, err := s.q.GetAIBudget(ctx, id)
+	if err != nil {
+		return db.AiBudget{}, fmt.Errorf("loading ai budget: %w", err)
+	}
+	if err := s.aiTenantGuard(ctx, existing.TenantID); err != nil {
+		return db.AiBudget{}, err
+	}
+	period := strings.TrimSpace(in.Period)
+	if period == "" {
+		period = "monthly"
+	}
+	soft := in.SoftThresholdPct
+	if soft == 0 {
+		soft = 80
+	}
+	hard := in.HardThresholdPct
+	if hard == 0 {
+		hard = 100
+	}
+	if err := validateAIBudgetThresholds(soft, hard); err != nil {
+		return db.AiBudget{}, err
+	}
+	// Preserve the scope when the caller omits it, so a limit-only edit can't
+	// silently reset a provider/owner/workspace budget back to global.
+	scope := strings.TrimSpace(in.Scope)
+	scopeRef := strings.TrimSpace(in.ScopeRef)
+	if scope == "" {
+		scope, scopeRef = existing.Scope, existing.ScopeRef
+	}
+	b, err := s.q.UpdateAIBudget(ctx, db.UpdateAIBudgetParams{ID: id, Scope: scope, ScopeRef: scopeRef, LimitUsd: in.LimitUSD, Period: period, SoftThresholdPct: soft, HardThresholdPct: hard})
+	if err != nil {
+		return db.AiBudget{}, fmt.Errorf("updating ai budget: %w", err)
+	}
+	s.emitAIAudit(ctx, "ai_budget", b.ID, "updated", "AI budget updated", map[string]any{"limit_usd": b.LimitUsd, "period": b.Period, "scope": b.Scope}, "")
+	return b, nil
+}
+
+func (s *Service) DeleteAIBudget(ctx context.Context, id uuid.UUID) error {
+	existing, err := s.q.GetAIBudget(ctx, id)
+	if err != nil {
+		return fmt.Errorf("loading ai budget: %w", err)
+	}
+	if err := s.aiTenantGuard(ctx, existing.TenantID); err != nil {
+		return err
+	}
+	if err := s.q.DeleteAIBudget(ctx, id); err != nil {
+		return fmt.Errorf("deleting ai budget: %w", err)
+	}
+	s.emitAIAudit(ctx, "ai_budget", id, "deleted", "AI budget deleted", nil, "")
+	return nil
+}
+
+// UpdateAIQuota edits a quota's limit/period/enforcement.
+func (s *Service) UpdateAIQuota(ctx context.Context, id uuid.UUID, limit float64, period, enforcement string) (db.AiQuota, error) {
+	if limit <= 0 {
+		return db.AiQuota{}, fmt.Errorf("limit_quantity must be greater than zero")
+	}
+	existing, err := s.q.GetAIQuota(ctx, id)
+	if err != nil {
+		return db.AiQuota{}, fmt.Errorf("loading ai quota: %w", err)
+	}
+	if err := s.aiTenantGuard(ctx, existing.TenantID); err != nil {
+		return db.AiQuota{}, err
+	}
+	if period = strings.TrimSpace(period); period == "" {
+		period = "monthly"
+	}
+	if enforcement = strings.ToLower(strings.TrimSpace(enforcement)); enforcement != "block" {
+		enforcement = "warn"
+	}
+	q, err := s.q.UpdateAIQuota(ctx, db.UpdateAIQuotaParams{ID: id, LimitQuantity: limit, Period: period, Enforcement: enforcement})
+	if err != nil {
+		return db.AiQuota{}, fmt.Errorf("updating ai quota: %w", err)
+	}
+	s.emitAIAudit(ctx, "ai_quota", q.ID, "updated", "AI quota updated", map[string]any{"metric": q.Metric, "limit": q.LimitQuantity, "enforcement": q.Enforcement}, "")
+	return q, nil
+}
+
+func (s *Service) DeleteAIQuota(ctx context.Context, id uuid.UUID) error {
+	existing, err := s.q.GetAIQuota(ctx, id)
+	if err != nil {
+		return fmt.Errorf("loading ai quota: %w", err)
+	}
+	if err := s.aiTenantGuard(ctx, existing.TenantID); err != nil {
+		return err
+	}
+	if err := s.q.DeleteAIQuota(ctx, id); err != nil {
+		return fmt.Errorf("deleting ai quota: %w", err)
+	}
+	s.emitAIAudit(ctx, "ai_quota", id, "deleted", "AI quota deleted", nil, "")
+	return nil
+}
+
+// UpdateAIAccessPolicy edits a policy's rules/status.
+func (s *Service) UpdateAIAccessPolicy(ctx context.Context, id uuid.UUID, rules map[string]any, status string) (db.AiAccessPolicy, error) {
+	existing, err := s.q.GetAIAccessPolicy(ctx, id)
+	if err != nil {
+		return db.AiAccessPolicy{}, fmt.Errorf("loading ai policy: %w", err)
+	}
+	if err := s.aiTenantGuard(ctx, existing.TenantID); err != nil {
+		return db.AiAccessPolicy{}, err
+	}
+	if status = strings.ToLower(strings.TrimSpace(status)); status != "disabled" {
+		status = "active"
+	}
+	if rules == nil {
+		rules = map[string]any{} // store {} not null so the rule unmarshal is well-defined
+	}
+	raw, err := json.Marshal(rules)
+	if err != nil {
+		return db.AiAccessPolicy{}, fmt.Errorf("encoding policy rules: %w", err)
+	}
+	p, err := s.q.UpdateAIAccessPolicy(ctx, db.UpdateAIAccessPolicyParams{ID: id, Rules: raw, Status: status})
+	if err != nil {
+		return db.AiAccessPolicy{}, fmt.Errorf("updating ai policy: %w", err)
+	}
+	s.emitAIAudit(ctx, "ai_policy", p.ID, "updated", "AI policy updated", map[string]any{"name": p.Name, "status": p.Status}, "")
+	return p, nil
+}
+
+func (s *Service) DeleteAIAccessPolicy(ctx context.Context, id uuid.UUID) error {
+	existing, err := s.q.GetAIAccessPolicy(ctx, id)
+	if err != nil {
+		return fmt.Errorf("loading ai policy: %w", err)
+	}
+	if err := s.aiTenantGuard(ctx, existing.TenantID); err != nil {
+		return err
+	}
+	if err := s.q.DeleteAIAccessPolicy(ctx, id); err != nil {
+		return fmt.Errorf("deleting ai policy: %w", err)
+	}
+	s.emitAIAudit(ctx, "ai_policy", id, "deleted", "AI policy deleted", nil, "")
+	return nil
+}
+
+// LiteLLMSpendImportResult summarizes a spend-back sync.
+type LiteLLMSpendImportResult struct {
+	ProviderName string
+	Keys         int
+	TotalUSD     float64
+}
+
+// ImportLiteLLMSpend pulls the authoritative cumulative spend for each active
+// LiteLLM virtual key OPORD minted and records it as one updated-in-place usage
+// row per key (attributed to the key's owner/workspace via the instance), so
+// budgets reflect REAL LiteLLM spend - closing the cost-governance loop.
+func (s *Service) ImportLiteLLMSpend(ctx context.Context, providerName string) (LiteLLMSpendImportResult, error) {
+	p, err := s.q.GetAIProviderByName(ctx, providerName)
+	if err != nil {
+		return LiteLLMSpendImportResult{}, fmt.Errorf("ai provider %q not found: %w", providerName, err)
+	}
+	if p.Type != string(aiproviders.ProviderLiteLLM) {
+		return LiteLLMSpendImportResult{}, fmt.Errorf("ai provider %q is %q, not litellm", p.Name, p.Type)
+	}
+	prov, err := s.aiProvider(p.Type)
+	if err != nil {
+		return LiteLLMSpendImportResult{}, err
+	}
+	instances, err := s.q.ListAIServiceInstances(ctx)
+	if err != nil {
+		return LiteLLMSpendImportResult{}, err
+	}
+	baseCreds := s.aiCredentials(ctx, p)
+	cfg := aiProviderConfig(p)
+	result := LiteLLMSpendImportResult{ProviderName: p.Name}
+	for _, inst := range instances {
+		if inst.ProviderName != p.Name || inst.Status != "active" {
+			continue
+		}
+		creds := map[string]string{}
+		for k, v := range baseCreds {
+			creds[k] = v
+		}
+		if k := s.readMintedKey(ctx, mintedKeyPath(inst.Observed)); k != "" {
+			creds["minted_key"] = k
+		}
+		recs, uerr := prov.GetUsage(ctx, aiproviders.UsageRequest{
+			ProviderAccessID: inst.ProviderAccessID, Credentials: creds, Config: cfg,
+		})
+		if uerr != nil || len(recs) == 0 {
+			continue
+		}
+		spend := recs[0].CostUSD
+		result.Keys++
+		result.TotalUSD += spend
+		raw, _ := json.Marshal(map[string]any{"source": "litellm_spend", "key_alias": inst.ProviderAccessID})
+		instID := pgtype.UUID{Bytes: inst.ID, Valid: true}
+		if existing, ferr := s.q.FindAIKeySpendRecord(ctx, instID); ferr == nil {
+			_ = s.q.UpdateAIUsageRecordCost(ctx, db.UpdateAIUsageRecordCostParams{ID: existing.ID, CostUsd: spend})
+		} else {
+			now := time.Now()
+			_, _ = s.q.CreateAIUsageRecord(ctx, db.CreateAIUsageRecordParams{
+				InstanceID: instID, ProviderID: p.ID, PeriodStart: now, PeriodEnd: now,
+				Metric: "cost_usd", Quantity: spend, Unit: "usd", CostUsd: spend, Raw: raw,
+			})
+		}
+	}
+	s.emitAIAudit(ctx, "ai_provider", p.ID, "spend_imported", "LiteLLM spend imported",
+		map[string]any{"provider": p.Name, "keys": result.Keys, "total_usd": result.TotalUSD}, "")
+	return result, nil
+}
+
 // ImportAnthropicCosts pulls org-level spend from the Anthropic Admin Cost Report
 // API (GET /v1/organizations/cost_report) and records it as ai_usage_records - the
 // Anthropic twin of ImportOpenAICosts. Differences from the OpenAI path, per the
@@ -697,6 +969,10 @@ func (s *Service) GatewayOpenAIResponses(ctx context.Context, providerName strin
 		return AIGatewayResponse{}, err
 	}
 	cfg := aiProviderConfig(p)
+	payload, derr := s.applyGatewayDLP(ctx, p, cfg, payload)
+	if derr != nil {
+		return AIGatewayResponse{}, derr
+	}
 	baseURL := "https://api.openai.com"
 	if v, ok := cfg["base_url"].(string); ok && strings.TrimSpace(v) != "" {
 		baseURL = strings.TrimSpace(v)
@@ -731,33 +1007,157 @@ func (s *Service) GatewayOpenAIResponses(ctx context.Context, providerName strin
 	return AIGatewayResponse{StatusCode: resp.StatusCode, ContentType: contentType, Body: body}, nil
 }
 
+// GatewayAnthropicMessages proxies an Anthropic /v1/messages call with the SAME
+// governance as the OpenAI gateway: budget/quota spend gate, then forward with the
+// inference key (never exposed to the caller), then record real-cost usage. Lets
+// an app route Claude traffic through OPORD's enforcement + audit, not just OpenAI.
+func (s *Service) GatewayAnthropicMessages(ctx context.Context, providerName string, payload []byte) (AIGatewayResponse, error) {
+	name := strings.TrimSpace(providerName)
+	if name == "" {
+		name = "anthropic-main"
+	}
+	p, err := s.q.GetAIProviderByName(ctx, name)
+	if err != nil {
+		return AIGatewayResponse{}, fmt.Errorf("ai provider %q not found: %w", name, err)
+	}
+	if p.Type != string(aiproviders.ProviderAnthropic) {
+		return AIGatewayResponse{}, fmt.Errorf("ai provider %q is %q, not anthropic", p.Name, p.Type)
+	}
+	creds := s.aiCredentials(ctx, p)
+	// The /messages API needs an INFERENCE key (api_key), NOT the admin key.
+	key := firstNonEmpty(creds["api_key"], creds["anthropic_api_key"], creds["token"])
+	if key == "" {
+		return AIGatewayResponse{}, fmt.Errorf("anthropic inference api key (api_key) missing in secret_ref - the admin key cannot serve /messages")
+	}
+	if err := s.evaluateGatewayBudget(ctx, p.Name); err != nil {
+		return AIGatewayResponse{}, err
+	}
+	cfg := aiProviderConfig(p)
+	baseURL := "https://api.anthropic.com"
+	if v, ok := cfg["base_url"].(string); ok && strings.TrimSpace(v) != "" {
+		baseURL = strings.TrimSpace(v)
+	}
+	version := "2023-06-01"
+	if v, ok := cfg["anthropic_version"].(string); ok && strings.TrimSpace(v) != "" {
+		version = strings.TrimSpace(v)
+	}
+	payload, derr := s.applyGatewayDLP(ctx, p, cfg, payload)
+	if derr != nil {
+		return AIGatewayResponse{}, derr
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(baseURL, "/")+"/v1/messages", bytes.NewReader(payload))
+	if err != nil {
+		return AIGatewayResponse{}, err
+	}
+	req.Header.Set("x-api-key", key)
+	req.Header.Set("anthropic-version", version)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		s.emitAIAudit(ctx, "ai_gateway", uuid.Nil, "request_failed", err.Error(), map[string]any{"provider": p.Name}, "")
+		return AIGatewayResponse{}, fmt.Errorf("anthropic gateway request failed: %w", err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 10<<20))
+	if err != nil {
+		return AIGatewayResponse{}, fmt.Errorf("reading anthropic gateway response: %w", err)
+	}
+	contentType := resp.Header.Get("Content-Type")
+	if contentType == "" {
+		contentType = "application/json"
+	}
+	fields := map[string]any{"provider": p.Name, "status_code": resp.StatusCode}
+	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		s.recordGatewayUsage(ctx, p.ID, body)
+		s.emitAIAudit(ctx, "ai_gateway", uuid.Nil, "request_completed", "Anthropic gateway request completed", fields, "")
+	} else {
+		s.emitAIAudit(ctx, "ai_gateway", uuid.Nil, "request_rejected", "Anthropic gateway request returned an error", fields, "")
+	}
+	return AIGatewayResponse{StatusCode: resp.StatusCode, ContentType: contentType, Body: body}, nil
+}
+
+// applyGatewayDLP redacts PII/secrets from the request payload when DLP is
+// enabled for the provider, auditing the redaction counts by type (never values).
+// Returns the payload unchanged when DLP is off or nothing matched.
+func (s *Service) applyGatewayDLP(ctx context.Context, p db.AiProvider, cfg map[string]any, payload []byte) ([]byte, error) {
+	if !dlpEnabled(cfg) {
+		return payload, nil
+	}
+	redacted, hits, ok := redactDLP(payload)
+	if !ok {
+		// PII found but couldn't be redacted - fail CLOSED, never forward the raw.
+		total := 0
+		for _, v := range hits {
+			total += v
+		}
+		s.emitAIAudit(ctx, "ai_gateway", uuid.Nil, "dlp_redaction_failed",
+			fmt.Sprintf("DLP found %d sensitive value(s) but could not redact - request blocked", total),
+			map[string]any{"provider": p.Name, "total": total}, "")
+		return nil, &aiEnforcementError{reasons: []string{"DLP redaction failed - request blocked to avoid forwarding unredacted data"}}
+	}
+	if len(hits) == 0 {
+		return payload, nil
+	}
+	total := 0
+	fields := map[string]any{"provider": p.Name}
+	for k, v := range hits {
+		fields[k] = v
+		total += v
+	}
+	fields["total"] = total
+	s.emitAIAudit(ctx, "ai_gateway", uuid.Nil, "dlp_redacted",
+		fmt.Sprintf("DLP redacted %d sensitive value(s) before forwarding", total), fields, "")
+	return redacted, nil
+}
+
 func (s *Service) recordGatewayUsage(ctx context.Context, providerID uuid.UUID, body []byte) {
 	var payload struct {
 		Model string `json:"model"`
 		Usage struct {
-			InputTokens  float64 `json:"input_tokens"`
-			OutputTokens float64 `json:"output_tokens"`
-			TotalTokens  float64 `json:"total_tokens"`
+			InputTokens      float64 `json:"input_tokens"`
+			OutputTokens     float64 `json:"output_tokens"`
+			TotalTokens      float64 `json:"total_tokens"`
+			PromptTokens     float64 `json:"prompt_tokens"`     // OpenAI chat/completions alias
+			CompletionTokens float64 `json:"completion_tokens"` // OpenAI chat/completions alias
 		} `json:"usage"`
 	}
 	if err := json.Unmarshal(body, &payload); err != nil {
 		return
 	}
+	in := payload.Usage.InputTokens
+	if in == 0 {
+		in = payload.Usage.PromptTokens
+	}
+	out := payload.Usage.OutputTokens
+	if out == 0 {
+		out = payload.Usage.CompletionTokens
+	}
 	total := payload.Usage.TotalTokens
 	if total == 0 {
-		total = payload.Usage.InputTokens + payload.Usage.OutputTokens
+		total = in + out
 	}
 	if total == 0 {
 		return
+	}
+	// Real-time cost: price the call from the model table so budgets/cost-quotas
+	// bite on live $ (not just tokens). Authoritative spend for LiteLLM keys comes
+	// from the spend-back importer. When only a combined total is reported (no
+	// in/out split) price the total at the blended rate so cost isn't recorded as $0.
+	var cost float64
+	if in == 0 && out == 0 {
+		cost = estimateAICostTotal(payload.Model, total)
+	} else {
+		cost = estimateAICost(payload.Model, in, out)
 	}
 	now := time.Now()
 	raw, _ := json.Marshal(map[string]any{
 		"source":        "opord_gateway_lite",
 		"model":         payload.Model,
-		"input_tokens":  payload.Usage.InputTokens,
-		"output_tokens": payload.Usage.OutputTokens,
+		"input_tokens":  in,
+		"output_tokens": out,
+		"cost_basis":    "estimated",
 	})
 	_, _ = s.q.CreateAIUsageRecord(ctx, db.CreateAIUsageRecordParams{
-		ProviderID: providerID, PeriodStart: now, PeriodEnd: now, Metric: "tokens", Quantity: total, Unit: "tokens", CostUsd: 0, Raw: raw,
+		ProviderID: providerID, PeriodStart: now, PeriodEnd: now, Metric: "tokens", Quantity: total, Unit: "tokens", CostUsd: cost, Raw: raw,
 	})
 }

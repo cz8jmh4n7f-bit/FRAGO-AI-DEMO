@@ -9,11 +9,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/go-chi/chi/v5"
-	"github.com/google/uuid"
 	"github.com/cz8jmh4n7f-bit/opord-ai-demo/internal/auth"
 	"github.com/cz8jmh4n7f-bit/opord-ai-demo/internal/db"
 	"github.com/cz8jmh4n7f-bit/opord-ai-demo/internal/orchestrator"
+	"github.com/go-chi/chi/v5"
+	"github.com/google/uuid"
 )
 
 type aiProviderDTO struct {
@@ -657,6 +657,105 @@ func (s *Server) listAIQuotas(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, out)
 }
 
+func (s *Server) updateAIBudget(w http.ResponseWriter, r *http.Request) {
+	id, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	var req createAIBudgetReq
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	b, err := s.svc.UpdateAIBudget(r.Context(), id, orchestrator.AIBudgetInput{
+		Scope: req.Scope, ScopeRef: req.ScopeRef, LimitUSD: req.LimitUSD, Period: req.Period,
+		SoftThresholdPct: req.SoftThresholdPct, HardThresholdPct: req.HardThresholdPct,
+	})
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, aiBudgetSummaryToDTO(orchestrator.AIBudgetSummary{Budget: b, RemainingUSD: b.LimitUsd, Status: "ok"}))
+}
+
+func (s *Server) deleteAIBudget(w http.ResponseWriter, r *http.Request) {
+	id, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	if err := s.svc.DeleteAIBudget(r.Context(), id); err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
+}
+
+func (s *Server) updateAIQuota(w http.ResponseWriter, r *http.Request) {
+	id, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	var req createAIQuotaReq
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	q, err := s.svc.UpdateAIQuota(r.Context(), id, req.LimitQuantity, req.Period, req.Enforcement)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, aiQuotaToDTO(q))
+}
+
+func (s *Server) deleteAIQuota(w http.ResponseWriter, r *http.Request) {
+	id, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	if err := s.svc.DeleteAIQuota(r.Context(), id); err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
+}
+
+func (s *Server) updateAIPolicy(w http.ResponseWriter, r *http.Request) {
+	id, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	var req createAIPolicyReq
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	p, err := s.svc.UpdateAIAccessPolicy(r.Context(), id, req.Rules, req.Status)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, aiPolicyToDTO(p))
+}
+
+func (s *Server) deleteAIPolicy(w http.ResponseWriter, r *http.Request) {
+	id, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	if err := s.svc.DeleteAIAccessPolicy(r.Context(), id); err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
+}
+
 type createAIQuotaReq struct {
 	ServiceSlug   string  `json:"serviceSlug"`
 	Metric        string  `json:"metric"`
@@ -727,6 +826,54 @@ func (s *Server) listAIModels(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, out)
 }
 
+type aiAccessReviewDTO struct {
+	aiInstanceDTO
+	Flag    string `json:"flag"`
+	AgeDays int    `json:"ageDays"`
+}
+
+func (s *Server) listAIAccessReview(w http.ResponseWriter, r *http.Request) {
+	stale := 90
+	if raw := r.URL.Query().Get("staleDays"); raw != "" {
+		if n, err := strconv.Atoi(raw); err == nil && n > 0 {
+			stale = n
+		}
+	}
+	items, err := s.svc.ListAIAccessReview(r.Context(), stale)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err)
+		return
+	}
+	out := make([]aiAccessReviewDTO, 0, len(items))
+	for _, it := range items {
+		out = append(out, aiAccessReviewDTO{aiInstanceDTO: aiInstanceToDTO(it.Instance), Flag: it.Flag, AgeDays: it.AgeDays})
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+func (s *Server) recertifyAIInstance(w http.ResponseWriter, r *http.Request) {
+	id, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	var body struct {
+		ExtendDays int    `json:"extendDays"`
+		By         string `json:"by"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&body)
+	actor := body.By
+	if ident, ok := auth.IdentityFrom(r.Context()); ok && ident.Email != "" {
+		actor = ident.Email
+	}
+	inst, err := s.svc.RecertifyAIInstance(r.Context(), id, body.ExtendDays, actor)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"id": inst.ID.String(), "status": "recertified"})
+}
+
 func (s *Server) listAIRenewals(w http.ResponseWriter, r *http.Request) {
 	days := int32(30)
 	if raw := r.URL.Query().Get("days"); raw != "" {
@@ -782,6 +929,19 @@ func (s *Server) importOpenAIUsage(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, result)
 }
 
+func (s *Server) importLiteLLMSpend(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		ProviderName string `json:"providerName"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&req)
+	result, err := s.svc.ImportLiteLLMSpend(r.Context(), req.ProviderName)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
 func (s *Server) importAnthropicUsage(w http.ResponseWriter, r *http.Request) {
 	var req importAnthropicUsageReq
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -827,6 +987,22 @@ func (s *Server) gatewayOpenAIResponses(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	res, err := s.svc.GatewayOpenAIResponses(r.Context(), r.URL.Query().Get("provider"), body)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	w.Header().Set("Content-Type", res.ContentType)
+	w.WriteHeader(res.StatusCode)
+	_, _ = w.Write(res.Body)
+}
+
+func (s *Server) gatewayAnthropicMessages(w http.ResponseWriter, r *http.Request) {
+	body, err := io.ReadAll(io.LimitReader(r.Body, 10<<20))
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	res, err := s.svc.GatewayAnthropicMessages(r.Context(), r.URL.Query().Get("provider"), body)
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, err)
 		return

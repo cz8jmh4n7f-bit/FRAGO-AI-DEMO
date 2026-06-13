@@ -395,12 +395,39 @@ func (q *Queries) CreateAIUsageRecord(ctx context.Context, arg CreateAIUsageReco
 	return i, err
 }
 
+const deleteAIAccessPolicy = `-- name: DeleteAIAccessPolicy :exec
+delete from ai_access_policies where id = $1
+`
+
+func (q *Queries) DeleteAIAccessPolicy(ctx context.Context, id uuid.UUID) error {
+	_, err := q.db.Exec(ctx, deleteAIAccessPolicy, id)
+	return err
+}
+
+const deleteAIBudget = `-- name: DeleteAIBudget :exec
+delete from ai_budgets where id = $1
+`
+
+func (q *Queries) DeleteAIBudget(ctx context.Context, id uuid.UUID) error {
+	_, err := q.db.Exec(ctx, deleteAIBudget, id)
+	return err
+}
+
 const deleteAIProvider = `-- name: DeleteAIProvider :exec
 delete from ai_providers where id = $1
 `
 
 func (q *Queries) DeleteAIProvider(ctx context.Context, id uuid.UUID) error {
 	_, err := q.db.Exec(ctx, deleteAIProvider, id)
+	return err
+}
+
+const deleteAIQuota = `-- name: DeleteAIQuota :exec
+delete from ai_quotas where id = $1
+`
+
+func (q *Queries) DeleteAIQuota(ctx context.Context, id uuid.UUID) error {
+	_, err := q.db.Exec(ctx, deleteAIQuota, id)
 	return err
 }
 
@@ -412,6 +439,36 @@ where service_id in (select id from ai_services where provider_id = $1)
 func (q *Queries) DeleteAIServiceInstancesByProvider(ctx context.Context, providerID uuid.UUID) error {
 	_, err := q.db.Exec(ctx, deleteAIServiceInstancesByProvider, providerID)
 	return err
+}
+
+const findAIKeySpendRecord = `-- name: FindAIKeySpendRecord :one
+select id, instance_id, provider_id, period_start, period_end, metric, quantity, unit, cost_usd, raw, created_at
+from ai_usage_records
+where instance_id = $1
+  and metric = 'cost_usd'
+  and raw->>'source' = 'litellm_spend'
+limit 1
+`
+
+// The single cumulative-spend row for a LiteLLM virtual key (one per instance);
+// ImportLiteLLMSpend updates it in place so budgets count the live total once.
+func (q *Queries) FindAIKeySpendRecord(ctx context.Context, instanceID pgtype.UUID) (AiUsageRecord, error) {
+	row := q.db.QueryRow(ctx, findAIKeySpendRecord, instanceID)
+	var i AiUsageRecord
+	err := row.Scan(
+		&i.ID,
+		&i.InstanceID,
+		&i.ProviderID,
+		&i.PeriodStart,
+		&i.PeriodEnd,
+		&i.Metric,
+		&i.Quantity,
+		&i.Unit,
+		&i.CostUsd,
+		&i.Raw,
+		&i.CreatedAt,
+	)
+	return i, err
 }
 
 const findAIUsageRecordByImportKey = `-- name: FindAIUsageRecordByImportKey :one
@@ -454,6 +511,25 @@ func (q *Queries) FindAIUsageRecordByImportKey(ctx context.Context, arg FindAIUs
 		&i.CostUsd,
 		&i.Raw,
 		&i.CreatedAt,
+	)
+	return i, err
+}
+
+const getAIAccessPolicy = `-- name: GetAIAccessPolicy :one
+select id, name, tenant_id, rules, status, created_at, updated_at from ai_access_policies where id = $1
+`
+
+func (q *Queries) GetAIAccessPolicy(ctx context.Context, id uuid.UUID) (AiAccessPolicy, error) {
+	row := q.db.QueryRow(ctx, getAIAccessPolicy, id)
+	var i AiAccessPolicy
+	err := row.Scan(
+		&i.ID,
+		&i.Name,
+		&i.TenantID,
+		&i.Rules,
+		&i.Status,
+		&i.CreatedAt,
+		&i.UpdatedAt,
 	)
 	return i, err
 }
@@ -538,6 +614,26 @@ func (q *Queries) GetAIProviderCredentialByProvider(ctx context.Context, provide
 		&i.RotationDueAt,
 		&i.LastValidatedAt,
 		&i.LastValidationStatus,
+		&i.CreatedAt,
+	)
+	return i, err
+}
+
+const getAIQuota = `-- name: GetAIQuota :one
+select id, service_id, tenant_id, metric, limit_quantity, period, enforcement, created_at from ai_quotas where id = $1
+`
+
+func (q *Queries) GetAIQuota(ctx context.Context, id uuid.UUID) (AiQuota, error) {
+	row := q.db.QueryRow(ctx, getAIQuota, id)
+	var i AiQuota
+	err := row.Scan(
+		&i.ID,
+		&i.ServiceID,
+		&i.TenantID,
+		&i.Metric,
+		&i.LimitQuantity,
+		&i.Period,
+		&i.Enforcement,
 		&i.CreatedAt,
 	)
 	return i, err
@@ -1206,6 +1302,41 @@ func (q *Queries) ListAIUsageRecords(ctx context.Context) ([]ListAIUsageRecordsR
 	return items, nil
 }
 
+const recertifyAIServiceInstance = `-- name: RecertifyAIServiceInstance :one
+update ai_service_instances
+set expires_at = $2, updated_at = now()
+where id = $1
+returning id, service_id, request_id, provider_access_id, owner, tenant_id, workspace, status, spec, observed, provisioned_at, expires_at, revoked_at, created_at, updated_at
+`
+
+type RecertifyAIServiceInstanceParams struct {
+	ID        uuid.UUID          `json:"id"`
+	ExpiresAt pgtype.Timestamptz `json:"expires_at"`
+}
+
+func (q *Queries) RecertifyAIServiceInstance(ctx context.Context, arg RecertifyAIServiceInstanceParams) (AiServiceInstance, error) {
+	row := q.db.QueryRow(ctx, recertifyAIServiceInstance, arg.ID, arg.ExpiresAt)
+	var i AiServiceInstance
+	err := row.Scan(
+		&i.ID,
+		&i.ServiceID,
+		&i.RequestID,
+		&i.ProviderAccessID,
+		&i.Owner,
+		&i.TenantID,
+		&i.Workspace,
+		&i.Status,
+		&i.Spec,
+		&i.Observed,
+		&i.ProvisionedAt,
+		&i.ExpiresAt,
+		&i.RevokedAt,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
 const revokeAIServiceInstance = `-- name: RevokeAIServiceInstance :one
 update ai_service_instances
 set status = 'revoked', revoked_at = now(), updated_at = now()
@@ -1230,6 +1361,77 @@ func (q *Queries) RevokeAIServiceInstance(ctx context.Context, id uuid.UUID) (Ai
 		&i.ProvisionedAt,
 		&i.ExpiresAt,
 		&i.RevokedAt,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const updateAIAccessPolicy = `-- name: UpdateAIAccessPolicy :one
+update ai_access_policies
+set rules = $2, status = $3, updated_at = now()
+where id = $1
+returning id, name, tenant_id, rules, status, created_at, updated_at
+`
+
+type UpdateAIAccessPolicyParams struct {
+	ID     uuid.UUID `json:"id"`
+	Rules  []byte    `json:"rules"`
+	Status string    `json:"status"`
+}
+
+func (q *Queries) UpdateAIAccessPolicy(ctx context.Context, arg UpdateAIAccessPolicyParams) (AiAccessPolicy, error) {
+	row := q.db.QueryRow(ctx, updateAIAccessPolicy, arg.ID, arg.Rules, arg.Status)
+	var i AiAccessPolicy
+	err := row.Scan(
+		&i.ID,
+		&i.Name,
+		&i.TenantID,
+		&i.Rules,
+		&i.Status,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const updateAIBudget = `-- name: UpdateAIBudget :one
+update ai_budgets
+set scope = $2, scope_ref = $3, limit_usd = $4, period = $5, soft_threshold_pct = $6, hard_threshold_pct = $7, updated_at = now()
+where id = $1
+returning id, tenant_id, scope, scope_ref, limit_usd, period, soft_threshold_pct, hard_threshold_pct, created_at, updated_at
+`
+
+type UpdateAIBudgetParams struct {
+	ID               uuid.UUID `json:"id"`
+	Scope            string    `json:"scope"`
+	ScopeRef         string    `json:"scope_ref"`
+	LimitUsd         float64   `json:"limit_usd"`
+	Period           string    `json:"period"`
+	SoftThresholdPct int32     `json:"soft_threshold_pct"`
+	HardThresholdPct int32     `json:"hard_threshold_pct"`
+}
+
+func (q *Queries) UpdateAIBudget(ctx context.Context, arg UpdateAIBudgetParams) (AiBudget, error) {
+	row := q.db.QueryRow(ctx, updateAIBudget,
+		arg.ID,
+		arg.Scope,
+		arg.ScopeRef,
+		arg.LimitUsd,
+		arg.Period,
+		arg.SoftThresholdPct,
+		arg.HardThresholdPct,
+	)
+	var i AiBudget
+	err := row.Scan(
+		&i.ID,
+		&i.TenantID,
+		&i.Scope,
+		&i.ScopeRef,
+		&i.LimitUsd,
+		&i.Period,
+		&i.SoftThresholdPct,
+		&i.HardThresholdPct,
 		&i.CreatedAt,
 		&i.UpdatedAt,
 	)
@@ -1273,6 +1475,41 @@ func (q *Queries) UpdateAIProvider(ctx context.Context, arg UpdateAIProviderPara
 	return i, err
 }
 
+const updateAIQuota = `-- name: UpdateAIQuota :one
+update ai_quotas
+set limit_quantity = $2, period = $3, enforcement = $4
+where id = $1
+returning id, service_id, tenant_id, metric, limit_quantity, period, enforcement, created_at
+`
+
+type UpdateAIQuotaParams struct {
+	ID            uuid.UUID `json:"id"`
+	LimitQuantity float64   `json:"limit_quantity"`
+	Period        string    `json:"period"`
+	Enforcement   string    `json:"enforcement"`
+}
+
+func (q *Queries) UpdateAIQuota(ctx context.Context, arg UpdateAIQuotaParams) (AiQuota, error) {
+	row := q.db.QueryRow(ctx, updateAIQuota,
+		arg.ID,
+		arg.LimitQuantity,
+		arg.Period,
+		arg.Enforcement,
+	)
+	var i AiQuota
+	err := row.Scan(
+		&i.ID,
+		&i.ServiceID,
+		&i.TenantID,
+		&i.Metric,
+		&i.LimitQuantity,
+		&i.Period,
+		&i.Enforcement,
+		&i.CreatedAt,
+	)
+	return i, err
+}
+
 const updateAIServiceInstanceStatus = `-- name: UpdateAIServiceInstanceStatus :one
 update ai_service_instances
 set status = $2, observed = $3, updated_at = now()
@@ -1307,6 +1544,26 @@ func (q *Queries) UpdateAIServiceInstanceStatus(ctx context.Context, arg UpdateA
 		&i.UpdatedAt,
 	)
 	return i, err
+}
+
+const updateAIUsageRecordCost = `-- name: UpdateAIUsageRecordCost :exec
+update ai_usage_records
+set cost_usd = $2, quantity = $2, period_start = now(), period_end = now()
+where id = $1
+`
+
+type UpdateAIUsageRecordCostParams struct {
+	ID      uuid.UUID `json:"id"`
+	CostUsd float64   `json:"cost_usd"`
+}
+
+// The LiteLLM cumulative row is the live lifetime total for a key; bump BOTH
+// period_start and period_end to now() so it always falls inside the current
+// budget/quota period (otherwise the original-period row drops out next period
+// and the spend silently stops counting).
+func (q *Queries) UpdateAIUsageRecordCost(ctx context.Context, arg UpdateAIUsageRecordCostParams) error {
+	_, err := q.db.Exec(ctx, updateAIUsageRecordCost, arg.ID, arg.CostUsd)
+	return err
 }
 
 const upsertAIModelCatalog = `-- name: UpsertAIModelCatalog :one

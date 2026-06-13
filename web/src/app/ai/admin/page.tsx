@@ -13,7 +13,7 @@ export const metadata = { title: "AI Org Admin" };
 
 // Providers that expose org administration (the AdminProvisioner capability,
 // ADR-0022). Anthropic today; OpenAI/others fall through to the not-supported note.
-const ADMIN_TYPES = new Set(["anthropic"]);
+const ADMIN_TYPES = new Set(["anthropic", "openai"]);
 
 export default async function AIOrgAdminPage({
   searchParams,
@@ -91,9 +91,9 @@ export default async function AIOrgAdminPage({
         </Card>
       ) : (
         <>
-          <OrgUsersPanel provider={active.name} users={users} />
+          <OrgUsersPanel provider={active.name} providerType={active.type} users={users} />
           <InvitesPanel invites={invites} />
-          <WorkspacesPanel provider={active.name} workspaces={workspaces} users={users} />
+          <WorkspacesPanel provider={active.name} providerType={active.type} workspaces={workspaces} users={users} />
         </>
       )}
     </div>

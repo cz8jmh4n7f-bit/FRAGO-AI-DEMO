@@ -15,12 +15,13 @@ const API = "/bff";
 const inputCls =
   "h-9 w-full rounded-lg border border-input bg-card px-3 text-sm text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring";
 
-type ProviderType = "mock_ai" | "openai" | "anthropic";
+type ProviderType = "mock_ai" | "openai" | "anthropic" | "litellm";
 
 const providerDefaults: Record<ProviderType, { name: string; secretRef: string; scopes: string[] }> = {
   mock_ai: { name: "mock-ai-extra", secretRef: "", scopes: ["catalog:read", "access:govern"] },
   openai: { name: "openai-main", secretRef: "", scopes: ["models:read", "access:govern"] },
   anthropic: { name: "anthropic-main", secretRef: "", scopes: ["models:read", "access:govern"] },
+  litellm: { name: "litellm-proxy", secretRef: "", scopes: ["keys:mint", "access:govern"] },
 };
 
 export function AddAIProviderButton() {
@@ -99,6 +100,7 @@ export function AddAIProviderButton() {
                 <select className={inputCls} value={providerType} onChange={(e) => changeProviderType(e.target.value as ProviderType)}>
                   <option value="openai">OpenAI / ChatGPT</option>
                   <option value="anthropic">Anthropic / Claude Code</option>
+                  <option value="litellm">LiteLLM proxy (virtual keys)</option>
                   <option value="mock_ai">MockAI</option>
                 </select>
               </label>
@@ -115,9 +117,9 @@ export function AddAIProviderButton() {
                   placeholder="leave blank to use the env key"
                 />
                 <span className="text-xs text-muted-foreground">
-                  Leave blank to use the {providerType === "anthropic" ? "ANTHROPIC_API_KEY" : "OPENAI_API_KEY"}{" "}
-                  environment variable. For a secret store (OpenBao/Vault), enter a KV path holding api_key /
-                  openai_api_key / anthropic_api_key / token.
+                  {providerType === "litellm"
+                    ? "Enter a KV path (OpenBao/Vault) holding the LiteLLM proxy master_key - OPORD mints scoped virtual keys with it. Set the Base URL to your proxy."
+                    : "Leave blank to use the OPENAI_API_KEY / ANTHROPIC_API_KEY env var. For a secret store (OpenBao/Vault), enter a KV path holding api_key / openai_api_key / anthropic_api_key / token."}
                 </span>
               </label>
               <label className="flex flex-col gap-1.5">
@@ -126,7 +128,7 @@ export function AddAIProviderButton() {
                   className={inputCls}
                   value={baseUrl}
                   onChange={(e) => setBaseUrl(e.target.value)}
-                  placeholder={providerType === "anthropic" ? "https://api.anthropic.com" : "https://api.openai.com"}
+                  placeholder={providerType === "anthropic" ? "https://api.anthropic.com" : providerType === "litellm" ? "http://litellm:4000" : "https://api.openai.com"}
                 />
               </label>
               {providerType === "anthropic" && (

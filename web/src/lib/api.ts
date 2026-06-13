@@ -171,6 +171,14 @@ export async function fetchAIModels(): Promise<AIModelCatalogItem[]> {
   }
 }
 
+export async function fetchAIAccessReview(): Promise<import("./types").AIAccessReviewItem[]> {
+  try {
+    return await get<import("./types").AIAccessReviewItem[]>("/api/v1/ai/access-review");
+  } catch {
+    return [];
+  }
+}
+
 export async function fetchAIRenewals(): Promise<AIInstance[]> {
   try {
     return await get<AIInstance[]>("/api/v1/ai/renewals?days=30");

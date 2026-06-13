@@ -6,6 +6,7 @@ import { StatCard } from "@/components/stat-card";
 import { Badge } from "@/components/ui/badge";
 import { Card } from "@/components/ui/card";
 import { fetchAIQuotas } from "@/lib/api";
+import { QuotaRowActions } from "@/components/ai-governance-row-actions";
 import { formatDate } from "@/lib/utils";
 
 export const metadata = { title: "AI Quotas" };
@@ -40,6 +41,7 @@ export default async function AIQuotasPage() {
                   <th scope="col" className="px-5 py-3 font-medium">Period</th>
                   <th scope="col" className="px-5 py-3 font-medium">Enforcement</th>
                   <th scope="col" className="px-5 py-3 font-medium">Created</th>
+                  <th scope="col" className="px-5 py-3 font-medium text-right">Actions</th>
                 </tr>
               </thead>
               <tbody>
@@ -53,6 +55,7 @@ export default async function AIQuotasPage() {
                     <td className="px-5 py-3 text-muted-foreground">{q.period}</td>
                     <td className="px-5 py-3"><Badge variant={q.enforcement === "block" ? "danger" : "warning"}>{q.enforcement}</Badge></td>
                     <td className="px-5 py-3 text-muted-foreground">{formatDate(q.createdAt)}</td>
+                    <td className="px-5 py-3"><QuotaRowActions quota={q} /></td>
                   </tr>
                 ))}
               </tbody>

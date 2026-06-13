@@ -16,8 +16,8 @@ update mcp_servers set status = $2, updated_at = now() where id = $1 returning *
 delete from mcp_servers where id = $1;
 
 -- name: CreateMCPGrant :one
-insert into mcp_grants (server_id, owner, expires_at, granted_by, tenant_id)
-values ($1, $2, $3, $4, $5)
+insert into mcp_grants (server_id, owner, expires_at, granted_by, tenant_id, status)
+values ($1, $2, $3, $4, $5, $6)
 returning *;
 
 -- name: ListMCPGrants :many
@@ -25,6 +25,16 @@ select g.*, s.name as server_name, s.risk_tier as server_risk_tier
 from mcp_grants g
 join mcp_servers s on s.id = g.server_id
 order by g.created_at desc;
+
+-- name: FindLatestMCPGrant :one
+-- Most recent grant for a server+owner in ANY state (to avoid duplicate requests).
+select g.* from mcp_grants g
+where g.server_id = $1 and lower(g.owner) = lower($2)
+order by g.created_at desc
+limit 1;
+
+-- name: SetMCPGrantStatus :one
+update mcp_grants set status = $2 where id = $1 returning *;
 
 -- name: FindActiveMCPGrant :one
 select g.* from mcp_grants g

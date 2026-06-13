@@ -24,11 +24,22 @@ export function AIRequestButton({ service }: { service: AIService }) {
   const [owner, setOwner] = useState("");
   const [workspace, setWorkspace] = useState("default");
   const [justification, setJustification] = useState("");
+  // LiteLLM virtual-key scoping (only shown for that service): the minted key is
+  // restricted to these models + budget.
+  const isLiteLLMKey = service.slug === "litellm-virtual-key";
+  const [models, setModels] = useState("");
+  const [maxBudget, setMaxBudget] = useState("");
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
     setBusy(true);
     try {
+      const metadata: Record<string, unknown> = {};
+      if (isLiteLLMKey) {
+        const list = models.split(",").map((m) => m.trim()).filter(Boolean);
+        if (list.length) metadata.models = list;
+        if (maxBudget.trim()) metadata.max_budget = Number(maxBudget);
+      }
       const res = await fetch(`${API}/api/v1/ai/requests`, {
         method: "POST",
         headers: { "Content-Type": "application/json", ...authHeaders() },
@@ -40,6 +51,7 @@ export function AIRequestButton({ service }: { service: AIService }) {
           owner,
           workspace,
           justification,
+          ...(Object.keys(metadata).length ? { metadata } : {}),
         }),
       });
       const data = await res.json().catch(() => ({}));
@@ -98,6 +110,19 @@ export function AIRequestButton({ service }: { service: AIService }) {
                   onChange={(e) => setJustification(e.target.value)}
                 />
               </label>
+              {isLiteLLMKey && (
+                <div className="grid grid-cols-2 gap-2 rounded-lg border border-border bg-muted/30 p-3">
+                  <label className="col-span-2 text-xs font-medium text-muted-foreground">Scope the minted key (LiteLLM enforces these at runtime)</label>
+                  <label className="flex flex-col gap-1">
+                    <span className="text-xs text-muted-foreground">Models (comma-separated, empty = all)</span>
+                    <input className={inputCls} value={models} onChange={(e) => setModels(e.target.value)} placeholder="gpt-4o, mock-gpt" />
+                  </label>
+                  <label className="flex flex-col gap-1">
+                    <span className="text-xs text-muted-foreground">Max budget (USD, empty = none)</span>
+                    <input className={inputCls} type="number" min="0" step="0.01" value={maxBudget} onChange={(e) => setMaxBudget(e.target.value)} placeholder="50" />
+                  </label>
+                </div>
+              )}
               <div className="flex items-center justify-end gap-2">
                 <button type="button" onClick={() => setOpen(false)} className={button({ variant: "outline", size: "sm" })} disabled={busy}>
                   Cancel

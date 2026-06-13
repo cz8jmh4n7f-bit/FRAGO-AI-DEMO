@@ -6,6 +6,7 @@ import { StatCard } from "@/components/stat-card";
 import { Badge, type BadgeVariant } from "@/components/ui/badge";
 import { Card } from "@/components/ui/card";
 import { fetchAIBudgets } from "@/lib/api";
+import { BudgetRowActions } from "@/components/ai-governance-row-actions";
 
 export const metadata = { title: "AI Budgets" };
 
@@ -55,6 +56,7 @@ export default async function AIBudgetsPage() {
                   <th scope="col" className="px-5 py-3 font-medium text-right">Limit</th>
                   <th scope="col" className="px-5 py-3 font-medium text-right">Used</th>
                   <th scope="col" className="px-5 py-3 font-medium">Status</th>
+                  <th scope="col" className="px-5 py-3 font-medium text-right">Actions</th>
                 </tr>
               </thead>
               <tbody>
@@ -69,6 +71,7 @@ export default async function AIBudgetsPage() {
                     <td className="px-5 py-3 text-right tabular-nums">{usd(b.limitUsd)}</td>
                     <td className="px-5 py-3 text-right tabular-nums">{b.usagePct.toFixed(1)}%</td>
                     <td className="px-5 py-3"><Badge variant={statusVariant[b.status] ?? "default"}>{b.status}</Badge></td>
+                    <td className="px-5 py-3"><BudgetRowActions budget={b} /></td>
                   </tr>
                 ))}
               </tbody>

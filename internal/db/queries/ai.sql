@@ -99,6 +99,12 @@ set status = $2, observed = $3, updated_at = now()
 where id = $1
 returning *;
 
+-- name: RecertifyAIServiceInstance :one
+update ai_service_instances
+set expires_at = $2, updated_at = now()
+where id = $1
+returning *;
+
 -- name: CreateAIUsageRecord :one
 insert into ai_usage_records (
     instance_id, provider_id, period_start, period_end, metric, quantity, unit, cost_usd, raw
@@ -115,6 +121,25 @@ where provider_id = $1
   and metric = $4
   and raw->>'import_key' = sqlc.arg(import_key)::text
 limit 1;
+
+-- name: FindAIKeySpendRecord :one
+-- The single cumulative-spend row for a LiteLLM virtual key (one per instance);
+-- ImportLiteLLMSpend updates it in place so budgets count the live total once.
+select *
+from ai_usage_records
+where instance_id = $1
+  and metric = 'cost_usd'
+  and raw->>'source' = 'litellm_spend'
+limit 1;
+
+-- name: UpdateAIUsageRecordCost :exec
+-- The LiteLLM cumulative row is the live lifetime total for a key; bump BOTH
+-- period_start and period_end to now() so it always falls inside the current
+-- budget/quota period (otherwise the original-period row drops out next period
+-- and the spend silently stops counting).
+update ai_usage_records
+set cost_usd = $2, quantity = $2, period_start = now(), period_end = now()
+where id = $1;
 
 -- name: ListAIUsageRecords :many
 select
@@ -139,6 +164,15 @@ select * from ai_budgets order by created_at desc;
 -- name: GetAIBudget :one
 select * from ai_budgets where id = $1;
 
+-- name: UpdateAIBudget :one
+update ai_budgets
+set scope = $2, scope_ref = $3, limit_usd = $4, period = $5, soft_threshold_pct = $6, hard_threshold_pct = $7, updated_at = now()
+where id = $1
+returning *;
+
+-- name: DeleteAIBudget :exec
+delete from ai_budgets where id = $1;
+
 -- name: CreateAIQuota :one
 insert into ai_quotas (service_id, tenant_id, metric, limit_quantity, period, enforcement)
 values ($1, $2, $3, $4, $5, $6)
@@ -147,13 +181,37 @@ returning *;
 -- name: ListAIQuotas :many
 select * from ai_quotas order by created_at desc;
 
+-- name: GetAIQuota :one
+select * from ai_quotas where id = $1;
+
+-- name: UpdateAIQuota :one
+update ai_quotas
+set limit_quantity = $2, period = $3, enforcement = $4
+where id = $1
+returning *;
+
+-- name: DeleteAIQuota :exec
+delete from ai_quotas where id = $1;
+
 -- name: CreateAIAccessPolicy :one
 insert into ai_access_policies (name, tenant_id, rules, status)
 values ($1, $2, $3, $4)
 returning *;
 
+-- name: UpdateAIAccessPolicy :one
+update ai_access_policies
+set rules = $2, status = $3, updated_at = now()
+where id = $1
+returning *;
+
+-- name: DeleteAIAccessPolicy :exec
+delete from ai_access_policies where id = $1;
+
 -- name: ListAIAccessPolicies :many
 select * from ai_access_policies order by created_at desc;
+
+-- name: GetAIAccessPolicy :one
+select * from ai_access_policies where id = $1;
 
 -- name: UpsertAIModelCatalog :one
 insert into ai_model_catalog (provider_id, model, display_name, modality, status, metadata)

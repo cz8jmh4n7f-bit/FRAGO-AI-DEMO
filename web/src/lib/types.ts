@@ -2,7 +2,7 @@
 // Used by mock data now; will back the real API client later.
 
 export type ProviderType = "vsphere" | "proxmox" | "aws" | "azure" | "gcp";
-export type AIProviderType = "mock_ai" | "openai" | "anthropic" | "gemini" | "github_copilot" | "cursor";
+export type AIProviderType = "mock_ai" | "openai" | "anthropic" | "litellm" | "gemini" | "github_copilot" | "cursor";
 
 export type ClusterStatus =
   | "pending"
@@ -67,6 +67,11 @@ export interface AIWorkspace {
   createdAt?: string;
   archivedAt?: string;
   archived: boolean;
+}
+
+export interface AIAccessReviewItem extends AIInstance {
+  flag: string;
+  ageDays: number;
 }
 
 export interface AIInvite {

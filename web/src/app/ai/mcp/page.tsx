@@ -1,5 +1,5 @@
 import { Workflow } from "lucide-react";
-import { AuthorizeTester, MCPServerActions, RegisterMCPServerButton, RevokeMCPGrantButton } from "@/components/mcp-actions";
+import { AuthorizeTester, MCPServerActions, MCPGrantActions, RegisterMCPServerButton, RequestMCPAccessButton } from "@/components/mcp-actions";
 import { EmptyState } from "@/components/empty-state";
 import { PageHeader } from "@/components/page-header";
 import { Badge, type BadgeVariant } from "@/components/ui/badge";
@@ -24,7 +24,7 @@ export default async function MCPGovernancePage() {
         title="Agents & MCP governance"
         description="Govern which MCP servers and tools your agents may use - register approved servers, grant teams access, and enforce it at connect time."
       >
-        <RegisterMCPServerButton />
+        <div className="flex gap-2"><RequestMCPAccessButton servers={servers} /><RegisterMCPServerButton /></div>
       </PageHeader>
 
       {servers.length > 0 && (
@@ -101,7 +101,7 @@ export default async function MCPGovernancePage() {
                     <td className="px-5 py-3 font-medium">{g.owner}</td>
                     <td className="px-5 py-3 text-muted-foreground">{g.server}</td>
                     <td className="px-5 py-3"><Badge variant={g.status === "active" ? "success" : "default"}>{g.status}</Badge></td>
-                    <td className="px-5 py-3 text-right"><RevokeMCPGrantButton grant={g} /></td>
+                    <td className="px-5 py-3 text-right"><MCPGrantActions grant={g} /></td>
                   </tr>
                 ))}
               </tbody>

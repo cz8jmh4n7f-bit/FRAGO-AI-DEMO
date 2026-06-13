@@ -8,12 +8,12 @@ import (
 	"strings"
 	"time"
 
-	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5/pgconn"
-	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/cz8jmh4n7f-bit/opord-ai-demo/internal/aiproviders"
 	"github.com/cz8jmh4n7f-bit/opord-ai-demo/internal/auth"
 	"github.com/cz8jmh4n7f-bit/opord-ai-demo/internal/db"
+	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgtype"
 )
 
 // AIProviderInput registers an AI backend without storing raw provider secrets.
@@ -592,6 +592,78 @@ func (s *Service) ReapExpiredAIInstances(ctx context.Context) (int, error) {
 		reaped++
 	}
 	return reaped, nil
+}
+
+// AIAccessReviewItem is one grant in the access-review work-list with a flag.
+type AIAccessReviewItem struct {
+	Instance db.ListAIServiceInstancesRow
+	Flag     string // ok | no_expiry | overdue | expiring_soon | long_lived
+	AgeDays  int
+}
+
+// ListAIAccessReview returns active AI grants annotated for periodic recert
+// (SOC2/ISO access review). The flag is the FIRST matching condition, in
+// priority order: no_expiry (standing access, no TTL), overdue (past its expiry -
+// a reaper gap), expiring_soon (expires within staleDays), long_lived (has a
+// future TTL but was granted more than staleDays ago - long-standing access worth
+// re-attesting). Everything else is ok. Tenant-scoped.
+func (s *Service) ListAIAccessReview(ctx context.Context, staleDays int) ([]AIAccessReviewItem, error) {
+	if staleDays <= 0 {
+		staleDays = 90
+	}
+	rows, err := s.ListAIInstances(ctx)
+	if err != nil {
+		return nil, err
+	}
+	now := time.Now()
+	out := make([]AIAccessReviewItem, 0, len(rows))
+	for _, r := range rows {
+		if r.Status != "active" && r.Status != "suspended" {
+			continue
+		}
+		age := int(now.Sub(r.CreatedAt).Hours() / 24)
+		flag := "ok"
+		switch {
+		case !r.ExpiresAt.Valid:
+			flag = "no_expiry"
+		case r.ExpiresAt.Time.Before(now):
+			flag = "overdue"
+		case r.ExpiresAt.Time.Before(now.AddDate(0, 0, staleDays)):
+			flag = "expiring_soon"
+		case age >= staleDays:
+			flag = "long_lived"
+		}
+		out = append(out, AIAccessReviewItem{Instance: r, Flag: flag, AgeDays: age})
+	}
+	return out, nil
+}
+
+// RecertifyAIInstance re-justifies a grant for another window by extending its
+// expiry; the action is audited (the access-review attestation record).
+func (s *Service) RecertifyAIInstance(ctx context.Context, id uuid.UUID, extendDays int, actor string) (*db.AiServiceInstance, error) {
+	if extendDays <= 0 {
+		extendDays = 90
+	}
+	inst, err := s.q.GetAIServiceInstance(ctx, id)
+	if err != nil {
+		return nil, fmt.Errorf("ai instance %s not found: %w", id, err)
+	}
+	if tid, scoped := scopeTenant(ctx); scoped && !tenantVisible(inst.TenantID, tid) {
+		return nil, fmt.Errorf("ai instance %s not found", id)
+	}
+	if inst.Status != "active" && inst.Status != "suspended" {
+		return nil, fmt.Errorf("ai instance %s is %q, not recertifiable", id, inst.Status)
+	}
+	newExp := time.Now().AddDate(0, 0, extendDays)
+	updated, err := s.q.RecertifyAIServiceInstance(ctx, db.RecertifyAIServiceInstanceParams{
+		ID: id, ExpiresAt: pgtype.Timestamptz{Time: newExp, Valid: true},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("recertifying ai instance: %w", err)
+	}
+	s.emitAIAudit(ctx, "ai_instance", id, "recertified", "AI access recertified (access review)",
+		map[string]any{"owner": inst.Owner, "extend_days": extendDays, "new_expiry": newExp.Format(time.RFC3339)}, actor)
+	return &updated, nil
 }
 
 // RevokeAIInstance revokes an AI access instance through the AI provider.

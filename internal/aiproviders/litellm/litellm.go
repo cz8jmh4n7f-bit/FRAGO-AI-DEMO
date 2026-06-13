@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -242,9 +243,12 @@ func (p Provider) RevokeAccess(ctx context.Context, req aiproviders.RevokeReques
 	return nil
 }
 
-// GetUsage pulls the key's real spend from LiteLLM (the spend-report path).
+// GetUsage pulls the key's REAL cumulative spend from LiteLLM. key/info by the
+// raw key is authoritative (the minted_key the orchestrator reads from the secret
+// store); it falls back to a by-alias lookup. Returns the current TOTAL spend
+// (the importer stores it as one updated-in-place row, not additively).
 func (p Provider) GetUsage(ctx context.Context, req aiproviders.UsageRequest) ([]aiproviders.UsageRecord, error) {
-	if req.ProviderAccessID == "" || masterKey(req.Credentials) == "" {
+	if masterKey(req.Credentials) == "" {
 		return nil, nil
 	}
 	var out struct {
@@ -253,14 +257,20 @@ func (p Provider) GetUsage(ctx context.Context, req aiproviders.UsageRequest) ([
 			Models []string `json:"models"`
 		} `json:"info"`
 	}
-	// key_info supports lookup by alias on recent LiteLLM; tolerate failure.
-	if err := p.do(ctx, req.Credentials, req.Config, http.MethodGet,
-		"/key/info?key_alias="+req.ProviderAccessID, nil, &out); err != nil {
+	q := ""
+	if k := strings.TrimSpace(req.Credentials["minted_key"]); k != "" {
+		q = "/key/info?key=" + url.QueryEscape(k)
+	} else if req.ProviderAccessID != "" {
+		q = "/key/info?key_alias=" + url.QueryEscape(req.ProviderAccessID)
+	} else {
+		return nil, nil
+	}
+	if err := p.do(ctx, req.Credentials, req.Config, http.MethodGet, q, nil, &out); err != nil {
 		return nil, err
 	}
 	return []aiproviders.UsageRecord{{
 		Metric: "cost_usd", Quantity: out.Info.Spend, Unit: "usd", CostUSD: out.Info.Spend,
-		Raw: map[string]any{"source": "litellm_key_info", "provider_access_id": req.ProviderAccessID},
+		Raw: map[string]any{"source": "litellm_spend", "provider_access_id": req.ProviderAccessID},
 	}}, nil
 }
 

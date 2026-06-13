@@ -5,6 +5,7 @@ import { PageHeader } from "@/components/page-header";
 import { Badge } from "@/components/ui/badge";
 import { Card } from "@/components/ui/card";
 import { fetchAIPolicies } from "@/lib/api";
+import { PolicyRowActions } from "@/components/ai-governance-row-actions";
 import { formatDate } from "@/lib/utils";
 
 export const metadata = { title: "AI Policies" };
@@ -36,6 +37,9 @@ export default async function AIPoliciesPage() {
               <pre className="mt-4 max-h-56 overflow-auto rounded-lg bg-muted p-3 text-xs text-muted-foreground">
                 {JSON.stringify(p.rules ?? {}, null, 2)}
               </pre>
+              <div className="mt-3 flex justify-end">
+                <PolicyRowActions policy={p} />
+              </div>
             </Card>
           ))}
         </div>

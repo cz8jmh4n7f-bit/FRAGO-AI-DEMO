@@ -14,8 +14,8 @@ import (
 )
 
 const createMCPGrant = `-- name: CreateMCPGrant :one
-insert into mcp_grants (server_id, owner, expires_at, granted_by, tenant_id)
-values ($1, $2, $3, $4, $5)
+insert into mcp_grants (server_id, owner, expires_at, granted_by, tenant_id, status)
+values ($1, $2, $3, $4, $5, $6)
 returning id, server_id, owner, status, expires_at, granted_by, tenant_id, created_at, revoked_at
 `
 
@@ -25,6 +25,7 @@ type CreateMCPGrantParams struct {
 	ExpiresAt pgtype.Timestamptz `json:"expires_at"`
 	GrantedBy string             `json:"granted_by"`
 	TenantID  pgtype.UUID        `json:"tenant_id"`
+	Status    string             `json:"status"`
 }
 
 func (q *Queries) CreateMCPGrant(ctx context.Context, arg CreateMCPGrantParams) (McpGrant, error) {
@@ -34,6 +35,7 @@ func (q *Queries) CreateMCPGrant(ctx context.Context, arg CreateMCPGrantParams) 
 		arg.ExpiresAt,
 		arg.GrantedBy,
 		arg.TenantID,
+		arg.Status,
 	)
 	var i McpGrant
 	err := row.Scan(
@@ -116,6 +118,36 @@ type FindActiveMCPGrantParams struct {
 
 func (q *Queries) FindActiveMCPGrant(ctx context.Context, arg FindActiveMCPGrantParams) (McpGrant, error) {
 	row := q.db.QueryRow(ctx, findActiveMCPGrant, arg.ServerID, arg.Lower)
+	var i McpGrant
+	err := row.Scan(
+		&i.ID,
+		&i.ServerID,
+		&i.Owner,
+		&i.Status,
+		&i.ExpiresAt,
+		&i.GrantedBy,
+		&i.TenantID,
+		&i.CreatedAt,
+		&i.RevokedAt,
+	)
+	return i, err
+}
+
+const findLatestMCPGrant = `-- name: FindLatestMCPGrant :one
+select g.id, g.server_id, g.owner, g.status, g.expires_at, g.granted_by, g.tenant_id, g.created_at, g.revoked_at from mcp_grants g
+where g.server_id = $1 and lower(g.owner) = lower($2)
+order by g.created_at desc
+limit 1
+`
+
+type FindLatestMCPGrantParams struct {
+	ServerID uuid.UUID `json:"server_id"`
+	Lower    string    `json:"lower"`
+}
+
+// Most recent grant for a server+owner in ANY state (to avoid duplicate requests).
+func (q *Queries) FindLatestMCPGrant(ctx context.Context, arg FindLatestMCPGrantParams) (McpGrant, error) {
+	row := q.db.QueryRow(ctx, findLatestMCPGrant, arg.ServerID, arg.Lower)
 	var i McpGrant
 	err := row.Scan(
 		&i.ID,
@@ -251,6 +283,32 @@ returning id, server_id, owner, status, expires_at, granted_by, tenant_id, creat
 
 func (q *Queries) RevokeMCPGrant(ctx context.Context, id uuid.UUID) (McpGrant, error) {
 	row := q.db.QueryRow(ctx, revokeMCPGrant, id)
+	var i McpGrant
+	err := row.Scan(
+		&i.ID,
+		&i.ServerID,
+		&i.Owner,
+		&i.Status,
+		&i.ExpiresAt,
+		&i.GrantedBy,
+		&i.TenantID,
+		&i.CreatedAt,
+		&i.RevokedAt,
+	)
+	return i, err
+}
+
+const setMCPGrantStatus = `-- name: SetMCPGrantStatus :one
+update mcp_grants set status = $2 where id = $1 returning id, server_id, owner, status, expires_at, granted_by, tenant_id, created_at, revoked_at
+`
+
+type SetMCPGrantStatusParams struct {
+	ID     uuid.UUID `json:"id"`
+	Status string    `json:"status"`
+}
+
+func (q *Queries) SetMCPGrantStatus(ctx context.Context, arg SetMCPGrantStatusParams) (McpGrant, error) {
+	row := q.db.QueryRow(ctx, setMCPGrantStatus, arg.ID, arg.Status)
 	var i McpGrant
 	err := row.Scan(
 		&i.ID,

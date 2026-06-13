@@ -10,12 +10,12 @@ import (
 	"log/slog"
 	"net/http"
 
-	"github.com/go-chi/chi/v5"
-	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/cz8jmh4n7f-bit/opord-ai-demo/internal/auth"
 	"github.com/cz8jmh4n7f-bit/opord-ai-demo/internal/jobs"
 	"github.com/cz8jmh4n7f-bit/opord-ai-demo/internal/models"
 	"github.com/cz8jmh4n7f-bit/opord-ai-demo/internal/orchestrator"
+	"github.com/go-chi/chi/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 // JobLister reads the durable job queue (River). Optional: when nil, the queue
@@ -125,6 +125,7 @@ func (s *Server) Routes() http.Handler {
 			r.Get("/ai/policies", s.listAIPolicies)
 			r.Get("/ai/models", s.listAIModels)
 			r.Get("/ai/renewals", s.listAIRenewals)
+			r.Get("/ai/access-review", s.listAIAccessReview)
 			r.Get("/ai/audit", s.listAIAudit)
 			// AI org administration reads (ADR-0022).
 			r.Get("/ai/admin/{name}/users", s.listAIOrgUsers)
@@ -135,6 +136,7 @@ func (s *Server) Routes() http.Handler {
 			r.Get("/ai/mcp/servers", s.listMCPServers)
 			r.Get("/ai/mcp/grants", s.listMCPGrants)
 			r.Get("/ai/mcp/authorize", s.authorizeMCP)
+			r.Post("/ai/mcp/requests", s.requestMCPAccess) // self-service request (viewer+)
 		})
 
 		// Writes: operator and up.
@@ -196,17 +198,27 @@ func (s *Server) Routes() http.Handler {
 			r.Post("/ai/requests/{name}/reject", s.rejectAIRequest)
 			r.Post("/ai/instances/{id}/revoke", s.revokeAIInstance)
 			r.Get("/ai/instances/{id}/secret", s.revealAIInstanceSecret)
+			r.Post("/ai/instances/{id}/recertify", s.recertifyAIInstance)
 			r.Post("/ai/instances/reap-expired", s.reapExpiredAIInstances)
 			// Agent & MCP governance writes.
 			r.Post("/ai/mcp/servers", s.registerMCPServer)
 			r.Delete("/ai/mcp/servers/{name}", s.deleteMCPServer)
 			r.Post("/ai/mcp/grants", s.grantMCPAccess)
+			r.Post("/ai/mcp/grants/{id}/approve", s.approveMCPGrant)
+			r.Post("/ai/mcp/grants/{id}/reject", s.rejectMCPGrant)
 			r.Post("/ai/mcp/grants/{id}/revoke", s.revokeMCPGrant)
 			r.Post("/ai/budgets", s.createAIBudget)
+			r.Patch("/ai/budgets/{id}", s.updateAIBudget)
+			r.Delete("/ai/budgets/{id}", s.deleteAIBudget)
 			r.Post("/ai/quotas", s.createAIQuota)
+			r.Patch("/ai/quotas/{id}", s.updateAIQuota)
+			r.Delete("/ai/quotas/{id}", s.deleteAIQuota)
 			r.Post("/ai/policies", s.createAIPolicy)
+			r.Patch("/ai/policies/{id}", s.updateAIPolicy)
+			r.Delete("/ai/policies/{id}", s.deleteAIPolicy)
 			r.Post("/ai/usage/import/openai", s.importOpenAIUsage)
 			r.Post("/ai/usage/import/anthropic", s.importAnthropicUsage)
+			r.Post("/ai/usage/import/litellm", s.importLiteLLMSpend)
 			// AI org administration writes (ADR-0022): invite/role/workspace/access.
 			r.Post("/ai/admin/{name}/invites", s.inviteAIOrgUser)
 			r.Post("/ai/admin/{name}/users/{userID}/role", s.setAIOrgRole)
@@ -216,6 +228,7 @@ func (s *Server) Routes() http.Handler {
 			r.Post("/ai/admin/{name}/workspaces/{wsID}/members", s.grantAIWorkspaceAccess)
 			r.Delete("/ai/admin/{name}/workspaces/{wsID}/members/{userID}", s.removeAIWorkspaceMember)
 			r.Post("/ai/gateway/openai/responses", s.gatewayOpenAIResponses)
+			r.Post("/ai/gateway/anthropic/messages", s.gatewayAnthropicMessages)
 			r.Post("/environments", s.createEnvironment)
 			r.Delete("/environments/{name}", s.destroyEnvironment)
 		})

@@ -5,10 +5,10 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/go-chi/chi/v5"
-	"github.com/google/uuid"
 	"github.com/cz8jmh4n7f-bit/opord-ai-demo/internal/db"
 	"github.com/cz8jmh4n7f-bit/opord-ai-demo/internal/orchestrator"
+	"github.com/go-chi/chi/v5"
+	"github.com/google/uuid"
 )
 
 // Agent & MCP governance HTTP surface: a registry of approved MCP servers,
@@ -145,6 +145,59 @@ func (s *Server) grantMCPAccess(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusCreated, map[string]any{"id": g.ID.String(), "owner": g.Owner, "status": g.Status})
+}
+
+type requestMCPReq struct {
+	Server    string `json:"server"`
+	Owner     string `json:"owner"`
+	Requester string `json:"requester"`
+}
+
+// requestMCPAccess is the self-service request (viewer+); creates a pending grant.
+func (s *Server) requestMCPAccess(w http.ResponseWriter, r *http.Request) {
+	var req requestMCPReq
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	g, err := s.svc.RequestMCPAccess(r.Context(), req.Server, req.Owner, req.Requester)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, map[string]any{"id": g.ID.String(), "owner": g.Owner, "status": g.Status})
+}
+
+func (s *Server) approveMCPGrant(w http.ResponseWriter, r *http.Request) {
+	id, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	var body decisionReq
+	_ = json.NewDecoder(r.Body).Decode(&body)
+	g, err := s.svc.ApproveMCPGrant(r.Context(), id, body.By)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"id": g.ID.String(), "status": g.Status})
+}
+
+func (s *Server) rejectMCPGrant(w http.ResponseWriter, r *http.Request) {
+	id, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	var body decisionReq
+	_ = json.NewDecoder(r.Body).Decode(&body)
+	g, err := s.svc.RejectMCPGrant(r.Context(), id, body.By)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"id": g.ID.String(), "status": g.Status})
 }
 
 func (s *Server) revokeMCPGrant(w http.ResponseWriter, r *http.Request) {

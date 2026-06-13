@@ -37,7 +37,10 @@ type Querier interface {
 	CreateTenant(ctx context.Context, name string) (Tenant, error)
 	CreateUser(ctx context.Context, arg CreateUserParams) (User, error)
 	DecideRequest(ctx context.Context, arg DecideRequestParams) (Request, error)
+	DeleteAIAccessPolicy(ctx context.Context, id uuid.UUID) error
+	DeleteAIBudget(ctx context.Context, id uuid.UUID) error
 	DeleteAIProvider(ctx context.Context, id uuid.UUID) error
+	DeleteAIQuota(ctx context.Context, id uuid.UUID) error
 	DeleteAIServiceInstancesByProvider(ctx context.Context, providerID uuid.UUID) error
 	DeleteCluster(ctx context.Context, id uuid.UUID) error
 	DeleteEnvironment(ctx context.Context, id uuid.UUID) error
@@ -45,12 +48,19 @@ type Querier interface {
 	DeleteNodesByCluster(ctx context.Context, clusterID uuid.UUID) error
 	DeleteProvider(ctx context.Context, id uuid.UUID) error
 	DeleteResource(ctx context.Context, id uuid.UUID) error
+	// The single cumulative-spend row for a LiteLLM virtual key (one per instance);
+	// ImportLiteLLMSpend updates it in place so budgets count the live total once.
+	FindAIKeySpendRecord(ctx context.Context, instanceID pgtype.UUID) (AiUsageRecord, error)
 	FindAIUsageRecordByImportKey(ctx context.Context, arg FindAIUsageRecordByImportKeyParams) (AiUsageRecord, error)
 	FindActiveMCPGrant(ctx context.Context, arg FindActiveMCPGrantParams) (McpGrant, error)
+	// Most recent grant for a server+owner in ANY state (to avoid duplicate requests).
+	FindLatestMCPGrant(ctx context.Context, arg FindLatestMCPGrantParams) (McpGrant, error)
+	GetAIAccessPolicy(ctx context.Context, id uuid.UUID) (AiAccessPolicy, error)
 	GetAIBudget(ctx context.Context, id uuid.UUID) (AiBudget, error)
 	GetAIProvider(ctx context.Context, id uuid.UUID) (AiProvider, error)
 	GetAIProviderByName(ctx context.Context, name string) (AiProvider, error)
 	GetAIProviderCredentialByProvider(ctx context.Context, providerID uuid.UUID) (AiProviderCredential, error)
+	GetAIQuota(ctx context.Context, id uuid.UUID) (AiQuota, error)
 	GetAIService(ctx context.Context, id uuid.UUID) (GetAIServiceRow, error)
 	GetAIServiceBySlug(ctx context.Context, slug string) (GetAIServiceBySlugRow, error)
 	GetAIServiceInstance(ctx context.Context, id uuid.UUID) (AiServiceInstance, error)
@@ -98,13 +108,23 @@ type Querier interface {
 	ListUsers(ctx context.Context) ([]User, error)
 	MarkJobFinished(ctx context.Context, arg MarkJobFinishedParams) (Job, error)
 	MarkJobRunning(ctx context.Context, arg MarkJobRunningParams) (Job, error)
+	RecertifyAIServiceInstance(ctx context.Context, arg RecertifyAIServiceInstanceParams) (AiServiceInstance, error)
 	RevokeAIServiceInstance(ctx context.Context, id uuid.UUID) (AiServiceInstance, error)
 	RevokeMCPGrant(ctx context.Context, id uuid.UUID) (McpGrant, error)
 	SetBackupResult(ctx context.Context, arg SetBackupResultParams) (Backup, error)
+	SetMCPGrantStatus(ctx context.Context, arg SetMCPGrantStatusParams) (McpGrant, error)
 	SetRequestResource(ctx context.Context, arg SetRequestResourceParams) (Request, error)
 	SetRequestTicket(ctx context.Context, arg SetRequestTicketParams) (Request, error)
+	UpdateAIAccessPolicy(ctx context.Context, arg UpdateAIAccessPolicyParams) (AiAccessPolicy, error)
+	UpdateAIBudget(ctx context.Context, arg UpdateAIBudgetParams) (AiBudget, error)
 	UpdateAIProvider(ctx context.Context, arg UpdateAIProviderParams) (AiProvider, error)
+	UpdateAIQuota(ctx context.Context, arg UpdateAIQuotaParams) (AiQuota, error)
 	UpdateAIServiceInstanceStatus(ctx context.Context, arg UpdateAIServiceInstanceStatusParams) (AiServiceInstance, error)
+	// The LiteLLM cumulative row is the live lifetime total for a key; bump BOTH
+	// period_start and period_end to now() so it always falls inside the current
+	// budget/quota period (otherwise the original-period row drops out next period
+	// and the spend silently stops counting).
+	UpdateAIUsageRecordCost(ctx context.Context, arg UpdateAIUsageRecordCostParams) error
 	UpdateClusterSpec(ctx context.Context, arg UpdateClusterSpecParams) (Cluster, error)
 	UpdateClusterState(ctx context.Context, arg UpdateClusterStateParams) (Cluster, error)
 	UpdateClusterStatus(ctx context.Context, arg UpdateClusterStatusParams) (Cluster, error)

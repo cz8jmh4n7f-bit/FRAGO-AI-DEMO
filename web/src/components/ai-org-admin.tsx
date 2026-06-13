@@ -20,16 +20,27 @@ const inputCls =
 // Org roles assignable via the API (admin is Console-only - mirrors the backend
 // guard in the Anthropic provider). Workspace roles per the role matrix:
 // workspace_billing is inherited-only, so it is not an assignable option.
-const ORG_ROLES = ["user", "claude_code_user", "developer", "billing"];
-const WORKSPACE_ROLES = ["workspace_user", "workspace_developer", "workspace_restricted_developer", "workspace_admin"];
+// Role sets are provider-aware: Anthropic (org user/developer/billing… +
+// workspace_*) vs OpenAI (org owner/reader + project owner/member).
+const ROLE_SETS: Record<string, { org: string[]; ws: string[] }> = {
+  anthropic: {
+    org: ["user", "claude_code_user", "developer", "billing"],
+    ws: ["workspace_user", "workspace_developer", "workspace_restricted_developer", "workspace_admin"],
+  },
+  openai: { org: ["reader", "owner"], ws: ["member", "owner"] },
+};
 
-// assignableWorkspaceRoles mirrors the backend RoleComboAllowed matrix so the UI
-// only offers valid combinations: a billing org user can ONLY become a
-// workspace_admin; everyone else can take any assignable workspace role. (Org
-// admins inherit workspace_admin and aren't granted explicitly.)
-function assignableWorkspaceRoles(orgRole: string): string[] {
-  if (orgRole === "billing") return ["workspace_admin"];
-  return WORKSPACE_ROLES;
+function orgRolesFor(pt: string): string[] {
+  return ROLE_SETS[pt]?.org ?? ROLE_SETS.anthropic.org;
+}
+function wsRolesFor(pt: string): string[] {
+  return ROLE_SETS[pt]?.ws ?? ROLE_SETS.anthropic.ws;
+}
+// assignableWorkspaceRoles mirrors the backend matrix: an Anthropic billing user
+// can ONLY become a workspace_admin; everyone else gets the provider's full set.
+function assignableWorkspaceRoles(pt: string, orgRole: string): string[] {
+  if (pt === "anthropic" && orgRole === "billing") return ["workspace_admin"];
+  return wsRolesFor(pt);
 }
 
 function api(provider: string, path: string) {
@@ -70,7 +81,7 @@ function roleLabel(role: string) {
 
 // --- Org users panel ---
 
-export function OrgUsersPanel({ provider, users }: { provider: string; users: AIOrgUser[] }) {
+export function OrgUsersPanel({ provider, providerType, users }: { provider: string; providerType: string; users: AIOrgUser[] }) {
   return (
     <Card className="overflow-hidden p-0">
       <div className="flex items-center justify-between border-b border-border px-5 py-3">
@@ -78,7 +89,7 @@ export function OrgUsersPanel({ provider, users }: { provider: string; users: AI
           <Users className="size-4 text-muted-foreground" />
           <h2 className="text-sm font-semibold">Organization users ({users.length})</h2>
         </div>
-        <InviteUserButton provider={provider} />
+        <InviteUserButton provider={provider} providerType={providerType} />
       </div>
       {users.length === 0 ? (
         <p className="px-5 py-8 text-center text-sm text-muted-foreground">No users yet. Invite one to get started.</p>
@@ -105,7 +116,7 @@ export function OrgUsersPanel({ provider, users }: { provider: string; users: AI
                   </td>
                   <td className="px-5 py-3 text-muted-foreground">{u.addedAt ? u.addedAt.slice(0, 10) : "-"}</td>
                   <td className="px-5 py-3">
-                    <OrgUserActions provider={provider} user={u} />
+                    <OrgUserActions provider={provider} providerType={providerType} user={u} />
                   </td>
                 </tr>
               ))}
@@ -117,11 +128,11 @@ export function OrgUsersPanel({ provider, users }: { provider: string; users: AI
   );
 }
 
-function InviteUserButton({ provider }: { provider: string }) {
+function InviteUserButton({ provider, providerType }: { provider: string; providerType: string }) {
   const { busy, run } = useAction();
   const [open, setOpen] = useState(false);
   const [email, setEmail] = useState("");
-  const [role, setRole] = useState("developer");
+  const [role, setRole] = useState(orgRolesFor(providerType)[0]);
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
@@ -160,7 +171,7 @@ function InviteUserButton({ provider }: { provider: string }) {
               <label className="flex flex-col gap-1.5">
                 <span className="text-xs font-medium text-muted-foreground">Org role</span>
                 <select className={inputCls} value={role} onChange={(e) => setRole(e.target.value)}>
-                  {ORG_ROLES.map((r) => (
+                  {orgRolesFor(providerType).map((r) => (
                     <option key={r} value={r}>{roleLabel(r)}</option>
                   ))}
                 </select>
@@ -175,7 +186,7 @@ function InviteUserButton({ provider }: { provider: string }) {
   );
 }
 
-function OrgUserActions({ provider, user }: { provider: string; user: AIOrgUser }) {
+function OrgUserActions({ provider, providerType, user }: { provider: string; providerType: string; user: AIOrgUser }) {
   const { busy, run } = useAction();
   const { prompt } = useConfirm();
   const [open, setOpen] = useState(false);
@@ -225,7 +236,7 @@ function OrgUserActions({ provider, user }: { provider: string; user: AIOrgUser 
               <label className="flex flex-col gap-1.5">
                 <span className="text-xs font-medium text-muted-foreground">Org role</span>
                 <select className={inputCls} value={role} onChange={(e) => setRole(e.target.value)}>
-                  {ORG_ROLES.map((r) => (
+                  {orgRolesFor(providerType).map((r) => (
                     <option key={r} value={r}>{roleLabel(r)}</option>
                   ))}
                 </select>
@@ -275,7 +286,7 @@ export function InvitesPanel({ invites }: { invites: AIInvite[] }) {
 
 // --- Workspaces panel ---
 
-export function WorkspacesPanel({ provider, workspaces, users }: { provider: string; workspaces: AIWorkspace[]; users: AIOrgUser[] }) {
+export function WorkspacesPanel({ provider, providerType, workspaces, users }: { provider: string; providerType: string; workspaces: AIWorkspace[]; users: AIOrgUser[] }) {
   const active = workspaces.filter((w) => !w.archived);
   return (
     <Card className="overflow-hidden p-0">
@@ -288,7 +299,7 @@ export function WorkspacesPanel({ provider, workspaces, users }: { provider: str
       ) : (
         <div className="divide-y divide-border">
           {active.map((w) => (
-            <WorkspaceRow key={w.id} provider={provider} workspace={w} users={users} />
+            <WorkspaceRow key={w.id} provider={provider} providerType={providerType} workspace={w} users={users} />
           ))}
         </div>
       )}
@@ -340,7 +351,7 @@ function CreateWorkspaceButton({ provider }: { provider: string }) {
   );
 }
 
-function WorkspaceRow({ provider, workspace, users }: { provider: string; workspace: AIWorkspace; users: AIOrgUser[] }) {
+function WorkspaceRow({ provider, providerType, workspace, users }: { provider: string; providerType: string; workspace: AIWorkspace; users: AIOrgUser[] }) {
   const { busy, run } = useAction();
   const { prompt } = useConfirm();
   const [open, setOpen] = useState(false);
@@ -377,7 +388,7 @@ function WorkspaceRow({ provider, workspace, users }: { provider: string; worksp
           </button>
         </div>
       </div>
-      {open && <WorkspaceMembers provider={provider} workspace={workspace} users={users} />}
+      {open && <WorkspaceMembers provider={provider} providerType={providerType} workspace={workspace} users={users} />}
     </div>
   );
 }
@@ -385,14 +396,14 @@ function WorkspaceRow({ provider, workspace, users }: { provider: string; worksp
 // WorkspaceMembers lazily loads the EFFECTIVE access set (explicit + inherited)
 // when expanded, and offers grant/remove. Inherited rows (org admin/billing) are
 // shown read-only since they come from the org role, not a workspace membership.
-function WorkspaceMembers({ provider, workspace, users }: { provider: string; workspace: AIWorkspace; users: AIOrgUser[] }) {
+function WorkspaceMembers({ provider, providerType, workspace, users }: { provider: string; providerType: string; workspace: AIWorkspace; users: AIOrgUser[] }) {
   const { busy, run } = useAction();
   const [access, setAccess] = useState<AIWorkspaceAccess[] | null>(null);
   const [userId, setUserId] = useState("");
   const [role, setRole] = useState("workspace_user");
   // The selected user's org role decides which workspace roles are valid (matrix).
   const selectedUser = users.find((u) => u.id === userId);
-  const roleOptions = assignableWorkspaceRoles(selectedUser?.role ?? "");
+  const roleOptions = assignableWorkspaceRoles(providerType, selectedUser?.role ?? "");
   // Org admins inherit workspace_admin everywhere - they can't (and needn't) be
   // granted explicitly, so they're not offered in the picker.
   const grantable = users.filter((u) => u.role !== "admin");
@@ -471,7 +482,7 @@ function WorkspaceMembers({ provider, workspace, users }: { provider: string; wo
               const next = e.target.value;
               setUserId(next);
               // Snap the role into the matrix-allowed set for the chosen user.
-              const allowed = assignableWorkspaceRoles(users.find((u) => u.id === next)?.role ?? "");
+              const allowed = assignableWorkspaceRoles(providerType, users.find((u) => u.id === next)?.role ?? "");
               if (!allowed.includes(role)) setRole(allowed[0]);
             }}
           >

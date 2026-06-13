@@ -98,6 +98,7 @@ export const navSections: NavSection[] = [
       { href: "/ai/policies", label: "AI Policies", icon: ShieldCheck },
       { href: "/ai/models", label: "AI Models", icon: Cpu },
       { href: "/ai/renewals", label: "AI Renewals", icon: Workflow },
+      { href: "/ai/access-review", label: "Access Review", icon: ShieldCheck },
       { href: "/ai/gateway", label: "AI Gateway", icon: Zap },
       { href: "/ai/providers", label: "AI Providers", icon: Server },
       { href: "/ai/audit", label: "AI Audit", icon: History },

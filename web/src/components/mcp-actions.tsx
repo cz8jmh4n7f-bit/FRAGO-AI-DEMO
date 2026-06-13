@@ -230,33 +230,116 @@ function GrantMCPButton({ server }: { server: string }) {
   );
 }
 
-export function RevokeMCPGrantButton({ grant }: { grant: MCPGrant }) {
+// MCPGrantActions is status-aware: a 'requested' grant shows Approve/Reject
+// (operator decision on a self-service request); an 'active' grant shows Revoke;
+// terminal states show the status text.
+export function MCPGrantActions({ grant }: { grant: MCPGrant }) {
   const router = useRouter();
   const { toast } = useToast();
   const [busy, setBusy] = useState(false);
-  if (grant.status !== "active") return <span className="text-xs text-muted-foreground">{grant.status}</span>;
-  async function revoke() {
+
+  async function act(action: "approve" | "reject" | "revoke", label: string) {
     setBusy(true);
     try {
-      const res = await fetch(`${API}/api/v1/ai/mcp/grants/${grant.id}/revoke`, {
+      const res = await fetch(`${API}/api/v1/ai/mcp/grants/${grant.id}/${action}`, {
         method: "POST",
         headers: { "Content-Type": "application/json", ...authHeaders() },
-        body: JSON.stringify({ by: "admin@opord.dev" }),
+        body: JSON.stringify({ by: "web" }),
       });
       if (!res.ok) {
-        toast({ variant: "error", title: "Revoke failed" });
+        const d = await res.json().catch(() => ({}));
+        toast({ variant: "error", title: `${label} failed`, description: d.error ?? `(${res.status})` });
         return;
       }
-      toast({ variant: "success", title: "Grant revoked" });
+      toast({ variant: "success", title: `${label} done` });
       router.refresh();
     } finally {
       setBusy(false);
     }
   }
+
+  if (grant.status === "requested") {
+    return (
+      <div className="flex justify-end gap-3">
+        <button type="button" onClick={() => act("approve", "Approve")} disabled={busy} className="text-xs font-medium text-success hover:underline">Approve</button>
+        <button type="button" onClick={() => act("reject", "Reject")} disabled={busy} className="text-xs font-medium text-danger hover:underline">Reject</button>
+      </div>
+    );
+  }
+  if (grant.status === "active") {
+    return (
+      <button type="button" onClick={() => act("revoke", "Revoke")} disabled={busy} className="text-xs font-medium text-danger hover:underline">
+        {busy ? "…" : "Revoke"}
+      </button>
+    );
+  }
+  return <span className="text-xs text-muted-foreground">{grant.status}</span>;
+}
+
+// RequestMCPAccessButton is the self-service path (viewer): pick a server + owner
+// and submit an access request that an operator approves.
+export function RequestMCPAccessButton({ servers }: { servers: MCPServer[] }) {
+  const router = useRouter();
+  const { toast } = useToast();
+  const [open, setOpen] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [server, setServer] = useState(servers[0]?.name ?? "");
+  const [owner, setOwner] = useState("");
+
+  async function submit(e: React.FormEvent) {
+    e.preventDefault();
+    setBusy(true);
+    try {
+      const res = await fetch(`${API}/api/v1/ai/mcp/requests`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...authHeaders() },
+        body: JSON.stringify({ server, owner, requester: owner }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        toast({ variant: "error", title: "Request failed", description: data.error ?? `(${res.status})` });
+        return;
+      }
+      toast({ variant: "success", title: "Access requested - awaiting approval" });
+      setOpen(false);
+      setOwner("");
+      router.refresh();
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  if (servers.length === 0) return null;
   return (
-    <button type="button" onClick={revoke} disabled={busy} className="text-xs font-medium text-danger hover:underline">
-      {busy ? "…" : "Revoke"}
-    </button>
+    <>
+      <button type="button" onClick={() => setOpen(true)} className={button({ variant: "outline", size: "sm" })}>
+        <UserPlus className="size-4" /> Request access
+      </button>
+      {open &&
+        typeof document !== "undefined" &&
+        createPortal(
+          <Modal title="Request MCP access" onClose={() => !busy && setOpen(false)}>
+            <form onSubmit={submit} className="space-y-4">
+              <p className="text-xs text-muted-foreground">Creates a pending request an operator approves. It does not authorize until approved.</p>
+              <label className="flex flex-col gap-1.5">
+                <span className="text-xs font-medium text-muted-foreground">Server</span>
+                <select className={inputCls} value={server} onChange={(e) => setServer(e.target.value)}>
+                  {servers.map((s) => (<option key={s.id} value={s.name}>{s.name}</option>))}
+                </select>
+              </label>
+              <label className="flex flex-col gap-1.5">
+                <span className="text-xs font-medium text-muted-foreground">Team / owner</span>
+                <input className={inputCls} required value={owner} onChange={(e) => setOwner(e.target.value)} placeholder="agent-team or you@company.com" />
+              </label>
+              <div className="flex items-center justify-end gap-2">
+                <button type="button" onClick={() => setOpen(false)} disabled={busy} className={button({ variant: "outline", size: "sm" })}>Cancel</button>
+                <button type="submit" disabled={busy} className={cn(button({ size: "sm" }), busy && "opacity-70")}>{busy && <Loader2 className="size-4 animate-spin" />} Request</button>
+              </div>
+            </form>
+          </Modal>,
+          document.body,
+        )}
+    </>
   );
 }
 

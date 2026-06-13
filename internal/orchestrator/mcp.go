@@ -7,10 +7,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/cz8jmh4n7f-bit/opord-ai-demo/internal/db"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
-	"github.com/cz8jmh4n7f-bit/opord-ai-demo/internal/db"
 )
 
 // Agent & MCP governance: a registry of approved MCP (Model Context Protocol)
@@ -141,7 +141,7 @@ func (s *Service) GrantMCPAccess(ctx context.Context, serverName, owner string, 
 		exp = pgtype.Timestamptz{Time: *expiresAt, Valid: true}
 	}
 	grant, err := s.q.CreateMCPGrant(ctx, db.CreateMCPGrantParams{
-		ServerID: srv.ID, Owner: owner, ExpiresAt: exp, GrantedBy: grantedBy, TenantID: tenantForCreate(ctx),
+		ServerID: srv.ID, Owner: owner, ExpiresAt: exp, GrantedBy: grantedBy, TenantID: tenantForCreate(ctx), Status: "active",
 	})
 	if err != nil {
 		return db.McpGrant{}, fmt.Errorf("granting mcp access: %w", err)
@@ -149,6 +149,53 @@ func (s *Service) GrantMCPAccess(ctx context.Context, serverName, owner string, 
 	s.emitAIAudit(ctx, "mcp_grant", grant.ID, "granted", "MCP access granted",
 		map[string]any{"server": serverName, "owner": owner, "risk_tier": srv.RiskTier}, grantedBy)
 	return grant, nil
+}
+
+// RequestMCPAccess is the self-service path: a user requests access to a server,
+// creating a 'requested' grant that does NOT authorize until an operator approves
+// it. Reuses the existing latest grant when one is already active/requested.
+func (s *Service) RequestMCPAccess(ctx context.Context, serverName, owner, requester string) (db.McpGrant, error) {
+	owner = strings.TrimSpace(owner)
+	if owner == "" {
+		return db.McpGrant{}, fmt.Errorf("owner is required")
+	}
+	srv, err := s.q.GetMCPServerByName(ctx, serverName)
+	if err != nil {
+		return db.McpGrant{}, fmt.Errorf("mcp server %q not found: %w", serverName, err)
+	}
+	if existing, err := s.q.FindLatestMCPGrant(ctx, db.FindLatestMCPGrantParams{ServerID: srv.ID, Lower: owner}); err == nil &&
+		(existing.Status == "active" || existing.Status == "requested") {
+		return existing, nil
+	}
+	grant, err := s.q.CreateMCPGrant(ctx, db.CreateMCPGrantParams{
+		ServerID: srv.ID, Owner: owner, GrantedBy: requester, TenantID: tenantForCreate(ctx), Status: "requested",
+	})
+	if err != nil {
+		return db.McpGrant{}, fmt.Errorf("requesting mcp access: %w", err)
+	}
+	s.emitAIAudit(ctx, "mcp_grant", grant.ID, "requested", "MCP access requested",
+		map[string]any{"server": serverName, "owner": owner, "risk_tier": srv.RiskTier}, requester)
+	return grant, nil
+}
+
+// ApproveMCPGrant flips a 'requested' grant to 'active' (operator decision).
+func (s *Service) ApproveMCPGrant(ctx context.Context, id uuid.UUID, actor string) (db.McpGrant, error) {
+	g, err := s.q.SetMCPGrantStatus(ctx, db.SetMCPGrantStatusParams{ID: id, Status: "active"})
+	if err != nil {
+		return db.McpGrant{}, fmt.Errorf("approving mcp grant: %w", err)
+	}
+	s.emitAIAudit(ctx, "mcp_grant", g.ID, "approved", "MCP access approved", map[string]any{"owner": g.Owner}, actor)
+	return g, nil
+}
+
+// RejectMCPGrant marks a 'requested' grant 'rejected'.
+func (s *Service) RejectMCPGrant(ctx context.Context, id uuid.UUID, actor string) (db.McpGrant, error) {
+	g, err := s.q.SetMCPGrantStatus(ctx, db.SetMCPGrantStatusParams{ID: id, Status: "rejected"})
+	if err != nil {
+		return db.McpGrant{}, fmt.Errorf("rejecting mcp grant: %w", err)
+	}
+	s.emitAIAudit(ctx, "mcp_grant", g.ID, "rejected", "MCP access rejected", map[string]any{"owner": g.Owner}, actor)
+	return g, nil
 }
 
 func (s *Service) ListMCPGrants(ctx context.Context) ([]db.ListMCPGrantsRow, error) {

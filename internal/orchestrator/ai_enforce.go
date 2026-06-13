@@ -7,9 +7,9 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/cz8jmh4n7f-bit/opord-ai-demo/internal/db"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgtype"
-	"github.com/cz8jmh4n7f-bit/opord-ai-demo/internal/db"
 )
 
 // aiReqContext carries the facts an AI request is evaluated against. It is built
@@ -59,6 +59,23 @@ type aiPolicyRule struct {
 
 func (r aiPolicyRule) isDeny() bool {
 	return !strings.EqualFold(strings.TrimSpace(r.Effect), "allow")
+}
+
+// hasSelector reports whether the rule constrains anything (at least one non-empty
+// selector). A rule with NO selectors matches EVERY request (each empty selector is
+// a wildcard), so a selector-less deny rule would be an accidental BLOCK-ALL - e.g.
+// a policy saved with empty/null rules. We treat such a rule as inert: a real AI
+// kill-switch must be explicit (disable the provider / set a $0 budget), never the
+// silent side effect of an empty rules object.
+func (r aiPolicyRule) hasSelector() bool {
+	for _, sel := range [][]string{r.Providers, r.Categories, r.Services, r.OwnerDomains} {
+		for _, v := range sel {
+			if strings.TrimSpace(v) != "" {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func (r aiPolicyRule) matches(rc aiReqContext) bool {
@@ -150,7 +167,9 @@ func (s *Service) evaluateAIGovernance(ctx context.Context, rc aiReqContext) err
 			if json.Unmarshal(p.Rules, &rule) != nil {
 				continue
 			}
-			if rule.isDeny() && rule.matches(rc) {
+			// A selector-less rule matches everything; never let an empty/null rules
+			// object become a silent deny-all (it would block every AI request).
+			if rule.isDeny() && rule.hasSelector() && rule.matches(rc) {
 				hard = append(hard, fmt.Sprintf("policy %q denies this request", p.Name))
 			}
 		}
@@ -268,23 +287,21 @@ func (s *Service) evaluateGatewayBudget(ctx context.Context, providerName string
 	return nil
 }
 
-// aiQuotaUsage sums usage for a metric over the quota's current period.
+// aiQuotaUsage sums usage for a metric over the quota's current period. A cost
+// quota sums the cost_usd column of every row (gateway calls record cost on the
+// "tokens" row) via aiCostUSD, which de-duplicates a provider's gateway estimate
+// against an authoritative spend import so the two are not double-counted.
 func aiQuotaUsage(metric, period string, usage []db.ListAIUsageRecordsRow) float64 {
 	start := aiBudgetPeriodStart(period)
-	costLike := metric == "cost_usd" || metric == "cost"
+	if metric == "cost_usd" || metric == "cost" {
+		return aiCostUSD(usage, start, func(db.ListAIUsageRecordsRow) bool { return true })
+	}
 	var total float64
 	for _, u := range usage {
 		if u.PeriodStart.Before(start) {
 			continue
 		}
-		um := strings.ToLower(strings.TrimSpace(u.Metric))
-		if costLike {
-			if um == "cost_usd" || um == "cost" {
-				total += u.CostUsd
-			}
-			continue
-		}
-		if um == metric { // tokens
+		if strings.EqualFold(strings.TrimSpace(u.Metric), metric) { // tokens
 			total += u.Quantity
 		}
 	}
