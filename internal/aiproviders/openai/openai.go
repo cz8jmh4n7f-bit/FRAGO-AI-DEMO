@@ -94,6 +94,9 @@ func (Provider) ListAvailableServices(context.Context, aiproviders.ServiceListRe
 func (p Provider) ListModels(ctx context.Context, req aiproviders.ModelListRequest) ([]aiproviders.Model, error) {
 	key := apiKey(req.Credentials, req.Config)
 	if key == "" {
+		key = strings.TrimSpace(req.Credentials["admin_api_key"])
+	}
+	if key == "" {
 		return nil, fmt.Errorf("openai api key missing (set secret_ref to an OpenBao secret with api_key, or OPENAI_API_KEY)")
 	}
 	baseURL := baseURL(req.Config, "https://api.openai.com")
@@ -109,6 +112,13 @@ func (p Provider) ListModels(ctx context.Context, req aiproviders.ModelListReque
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+			hint := "grant the key the api.model.read scope, or store a project key (sk-proj-…) with model access as api_key"
+			if strings.HasPrefix(key, "sk-admin-") {
+				hint = "this is an OpenAI admin key (sk-admin-…) - it governs the org but can't list models; store a project key (sk-proj-…) with the api.model.read scope as api_key for model sync"
+			}
+			return nil, fmt.Errorf("openai model sync: %s - %s", resp.Status, hint)
+		}
 		return nil, fmt.Errorf("openai model sync returned %s: %s", resp.Status, strings.TrimSpace(string(body)))
 	}
 	var payload struct {
