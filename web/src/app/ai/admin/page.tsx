@@ -14,6 +14,7 @@ export const metadata = { title: "AI Org Admin" };
 // Providers that expose org administration (the AdminProvisioner capability,
 // ADR-0022). Anthropic today; OpenAI/others fall through to the not-supported note.
 const ADMIN_TYPES = new Set(["anthropic", "openai"]);
+const TYPE_LABEL: Record<string, string> = { anthropic: "Anthropic", openai: "OpenAI" };
 
 export default async function AIOrgAdminPage({
   searchParams,
@@ -65,7 +66,7 @@ export default async function AIOrgAdminPage({
         description={`Manage the ${active.type} organization for "${active.name}" - users, roles, and workspaces, governed and audited through OPORD.`}
       />
 
-      {governable.length > 1 && (
+      {governable.length > 1 ? (
         <div className="flex flex-wrap items-center gap-2">
           <span className="text-sm text-muted-foreground">Provider:</span>
           {governable.map((p) => (
@@ -78,6 +79,35 @@ export default async function AIOrgAdminPage({
             </Link>
           ))}
         </div>
+      ) : (
+        // Only one provider supports org admin, so there's no switcher. Make it
+        // clear this page is provider-specific (not a global console) and how to
+        // manage another vendor's org (e.g. OpenAI) here too.
+        <p className="text-sm text-muted-foreground">
+          This is the <span className="font-medium text-foreground">{TYPE_LABEL[active.type] ?? active.type}</span> org
+          (<span className="font-medium text-foreground">{active.name}</span>). Org admin is supported for Anthropic and
+          OpenAI providers
+          {[...ADMIN_TYPES].filter((t) => t !== active.type).length > 0 && (
+            <>
+              {" "}
+              — add{" "}
+              {[...ADMIN_TYPES]
+                .filter((t) => t !== active.type)
+                .map((t) => TYPE_LABEL[t] ?? t)
+                .join(" or ")}{" "}
+              on the{" "}
+              <Link href="/ai/providers" className="font-medium text-foreground underline-offset-4 hover:underline">
+                AI Providers
+              </Link>{" "}
+              page to manage its organization here too
+            </>
+          )}
+          . Models live on the{" "}
+          <Link href="/ai/models" className="font-medium text-foreground underline-offset-4 hover:underline">
+            AI Models
+          </Link>{" "}
+          page.
+        </p>
       )}
 
       {loadError ? (
